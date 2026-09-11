@@ -1,0 +1,155 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * The palette is built around Munskänkarna's claret, with neutrals warmed
+ * slightly so long tables read as paper rather than as a spreadsheet. Every
+ * colour is declared once here and consumed as a Tailwind utility.
+ */
+@theme {
+  --color-paper: oklch(0.99 0.004 85);
+  --color-surface: oklch(1 0 0);
+  --color-surface-sunken: oklch(0.975 0.005 85);
+  --color-line: oklch(0.915 0.006 85);
+  --color-line-strong: oklch(0.86 0.008 85);
+
+  /* Three text tiers, each meeting WCAG AA (>= 4.5:1) against paper, surface
+     and surface-sunken. `ink-faint` is the binding constraint at 4.7:1; the
+     tiers are spaced ~0.10 in lightness so the hierarchy still reads. */
+  --color-ink: oklch(0.23 0.012 60);
+  --color-ink-muted: oklch(0.45 0.012 60);
+  --color-ink-faint: oklch(0.55 0.011 60);
+
+  --color-claret-50: oklch(0.97 0.015 5);
+  --color-claret-100: oklch(0.93 0.035 5);
+  --color-claret-300: oklch(0.75 0.12 5);
+  --color-claret-500: oklch(0.55 0.19 6);
+  --color-claret-600: oklch(0.48 0.19 6);
+  --color-claret-700: oklch(0.41 0.17 6);
+
+  /* Wine-style accents, used for the colour dot and type pills. */
+  --color-wine-red: oklch(0.45 0.16 18);
+  --color-wine-white: oklch(0.78 0.13 95);
+  --color-wine-rose: oklch(0.74 0.12 15);
+  --color-wine-sparkling: oklch(0.8 0.1 110);
+  --color-wine-fortified: oklch(0.45 0.1 50);
+  --color-wine-other: oklch(0.6 0.02 60);
+
+  /* Value verdicts. Green reads as "buy", amber as neutral, grey as "skip". */
+  /* Each foreground is tuned against its own tinted background to clear AA:
+     fynd 5.2:1, more 4.7:1, worth 4.9:1, not 4.8:1. */
+  --color-value-fynd: oklch(0.48 0.14 155);
+  --color-value-fynd-bg: oklch(0.95 0.04 155);
+  --color-value-more: oklch(0.5 0.12 200);
+  --color-value-more-bg: oklch(0.95 0.035 200);
+  --color-value-worth: oklch(0.52 0.09 85);
+  --color-value-worth-bg: oklch(0.96 0.04 85);
+  --color-value-not: oklch(0.52 0.015 60);
+  --color-value-not-bg: oklch(0.955 0.004 60);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+
+  /* Height of the sticky header, reserved up front so the page never reflows
+     once the sticky elements paint. */
+  --header-height: 3.75rem;
+}
+
+/*
+ * Dark palette.
+ *
+ * These are plain custom-property overrides rather than a nested `@theme`:
+ * Tailwind v4 resolves `@theme` at build time and flattens it out of any
+ * enclosing at-rule, which would silently make the dark values
+ * unconditional. Overriding the generated variables on `:root` keeps the
+ * media query intact, and every utility already reads them through var().
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: oklch(0.165 0.008 60);
+    --color-surface: oklch(0.205 0.009 60);
+    --color-surface-sunken: oklch(0.185 0.008 60);
+    --color-line: oklch(0.29 0.01 60);
+    --color-line-strong: oklch(0.37 0.012 60);
+    --color-ink: oklch(0.95 0.005 85);
+    --color-ink-muted: oklch(0.72 0.01 75);
+    --color-ink-faint: oklch(0.6 0.01 70);
+    --color-claret-50: oklch(0.26 0.04 6);
+    --color-claret-100: oklch(0.31 0.06 6);
+    --color-claret-300: oklch(0.6 0.14 6);
+    --color-claret-500: oklch(0.72 0.16 8);
+    --color-claret-600: oklch(0.78 0.15 10);
+    --color-claret-700: oklch(0.84 0.12 12);
+    --color-wine-red: oklch(0.62 0.17 18);
+    --color-wine-white: oklch(0.82 0.13 95);
+    --color-wine-rose: oklch(0.76 0.12 15);
+    --color-wine-sparkling: oklch(0.84 0.1 110);
+    --color-wine-fortified: oklch(0.6 0.1 50);
+    --color-wine-other: oklch(0.62 0.02 60);
+    --color-value-fynd: oklch(0.8 0.15 155);
+    --color-value-fynd-bg: oklch(0.29 0.06 155);
+    --color-value-more: oklch(0.8 0.12 200);
+    --color-value-more-bg: oklch(0.28 0.05 200);
+    --color-value-worth: oklch(0.83 0.11 85);
+    --color-value-worth-bg: oklch(0.29 0.045 85);
+    --color-value-not: oklch(0.68 0.012 60);
+    --color-value-not-bg: oklch(0.25 0.006 60);
+  }
+}
+
+html {
+  color-scheme: light dark;
+  /* Measured at runtime by useStickyOffset; this fallback keeps the very first
+     paint correct, before the observer reports the real height. */
+  --filters-height: 0px;
+  scroll-behavior: smooth;
+  /* Keeps the sticky header from covering anchored content. */
+  scroll-padding-top: calc(var(--header-height) + 1rem);
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Avoid horizontal jitter when a filter shortens the page. */
+  scrollbar-gutter: stable;
+}
+
+/* Numbers line up in columns instead of jittering as values change. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/* One consistent, visible focus treatment across every interactive element. */
+:where(a, button, input, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-claret-500);
+  outline-offset: 2px;
+  border-radius: 0.375rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Visible only to screen readers, but focusable for the skip link. */
+.sr-only-focusable:not(:focus):not(:focus-within) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}

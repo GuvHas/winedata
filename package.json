@@ -1,0 +1,38 @@
+{
+  "name": "winedata",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Weekly Munskänkarna wine ratings, matched to Systembolaget's catalog.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "sync:wines": "tsx scripts/sync-wines.ts",
+    "sync:latest": "tsx scripts/sync-wines.ts --latest",
+    "sync:seed": "tsx scripts/sync-wines.ts --latest --out seeds/sample-reviews.json",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "lucide-react": "^0.460.0",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@next/eslint-plugin-next": "^15.5.25",
+    "@tailwindcss/postcss": "^4.0.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.17.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "tailwindcss": "^4.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.70.0"
+  }
+}
