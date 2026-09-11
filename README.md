@@ -320,7 +320,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 169 tests
+python -m pytest          # 171 tests
 ruff check custom_components tests
 ```
 
@@ -328,6 +328,24 @@ CI runs the suite against the declared minimum (2024.12), the primary target
 (**2026.8**) and whatever Home Assistant ships today, plus a job exercising the
 Home Assistant-independent modules on Python 3.14 — weekly, so a breaking core
 release or an upstream markup change surfaces before users hit it.
+
+### Cutting a release
+
+HACS shows a **commit hash** rather than a version number until the repository
+has a *published GitHub Release*. It decides by calling GitHub's
+`repos.releases.list` API, which returns Release objects only — **a bare git
+tag is not enough**, and drafts and pre-releases are skipped.
+
+So releases are made by workflow, not by hand:
+
+1. Bump `version` in `custom_components/munskankarna/manifest.json` (and the
+   matching `version` in `pyproject.toml` — a test enforces they agree)
+2. Merge that to `main`
+3. **Actions → Release → Run workflow**
+
+The workflow reads the version from the manifest, creates the matching `vX.Y.Z`
+tag if needed, and publishes a non-draft Release marked latest. HACS then offers
+that version instead of a commit.
 
 Parser tests run against HTML captured from the live site
 (`tests/fixtures/`), and the suite includes a probe replicating Home

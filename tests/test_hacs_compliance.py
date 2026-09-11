@@ -165,3 +165,56 @@ def test_hacs_minimum_matches_declared_support() -> None:
     # The floor and the target must both appear in the CI matrix.
     assert "0.13.195" in workflow, "CI does not test the declared minimum"
     assert "0.13.355" in workflow, "CI does not test the 2026.8 target"
+
+
+def test_release_workflow_publishes_a_real_github_release() -> None:
+    """HACS shows a commit unless a published Release exists.
+
+    HACS decides via GitHub's `repos.releases.list` API, which returns Release
+    objects only — a bare git tag is not enough — and it skips drafts and
+    pre-releases. This workflow is what turns the manifest version into such a
+    Release.
+    """
+    workflow_path = REPO_ROOT / ".github" / "workflows" / "release.yaml"
+    assert workflow_path.is_file(), "no release workflow"
+
+    workflow = workflow_path.read_text(encoding="utf-8")
+    assert "gh release create" in workflow, "workflow never publishes a Release"
+
+    # Inspect the actual invocation rather than the whole file, so explanatory
+    # comments mentioning a flag do not count as using it.
+    start = workflow.index("gh release create")
+    invocation = ""
+    for line in workflow[start:].splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        invocation += " " + stripped
+        if not stripped.endswith("\\"):
+            break
+
+    assert "--latest" in invocation
+    # A draft or pre-release would be ignored by HACS.
+    assert "--draft" not in invocation, "a draft Release would be skipped by HACS"
+    assert "--prerelease" not in invocation, "a pre-release would be skipped by HACS"
+    # Writing tags and releases needs an explicit permission block.
+    assert "contents: write" in workflow
+
+    # The version must come from the manifest so the two cannot disagree.
+    assert "manifest.json" in workflow
+
+
+def test_manifest_version_matches_pyproject() -> None:
+    """One version, declared in two places that must agree."""
+    import json as _json
+    import re as _re
+
+    manifest = _json.loads(
+        (COMPONENT / "manifest.json").read_text(encoding="utf-8")
+    )["version"]
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = _re.search(r'^version\s*=\s*"([^"]+)"', pyproject, _re.M)
+    assert declared, "pyproject.toml declares no version"
+    assert declared.group(1) == manifest, (
+        f"pyproject {declared.group(1)} != manifest {manifest}"
+    )
