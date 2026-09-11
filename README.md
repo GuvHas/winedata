@@ -324,7 +324,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 271 tests
+python -m pytest          # 274 tests
 ruff check custom_components tests
 ```
 

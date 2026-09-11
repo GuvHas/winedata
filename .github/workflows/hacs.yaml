@@ -19,6 +19,12 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+          # `topics` and `description` are repository *settings*, not files, so
+          # nothing in a PR can satisfy them — they are set once under Settings
+          # -> General and About. Remove this ignore afterwards to re-enable
+          # both checks. Brand assets ship in custom_components/munskankarna/
+          # brand/, so the brands check is not ignored.
+          ignore: topics description
 
   hassfest:
     name: Hassfest
@@ -77,6 +83,10 @@ jobs:
           : > /tmp/core/custom_components/__init__.py
           : > /tmp/core/custom_components/munskankarna/__init__.py
           cp custom_components/munskankarna/{parser,api,const}.py \
+             /tmp/core/custom_components/munskankarna/
+          # test_parser_uses_only_stdlib_html_parsing reads the manifest to
+          # check no compiled parser dependency crept back in.
+          cp custom_components/munskankarna/manifest.json \
              /tmp/core/custom_components/munskankarna/
           cp tests/test_parser.py tests/test_api.py /tmp/core/tests/
           cp -r tests/fixtures /tmp/core/tests/

@@ -246,3 +246,66 @@ def test_workflows_do_not_pin_node20_actions() -> None:
                 f"{path.name}: actions/{name}@v{major} runs on Node 20; "
                 f"use v{floor} or newer"
             )
+
+
+def test_manifest_declares_every_home_assistant_component_it_uses() -> None:
+    """hassfest rejects a manifest that omits a component the code imports.
+
+    mqtt_bridge.py imports homeassistant.components.mqtt, which must be
+    declared. It belongs in `after_dependencies`, not `dependencies`: the
+    bridge is optional and fails soft when MQTT is not configured, so making
+    it a hard dependency would force MQTT on every install.
+    """
+    import json as _json
+    import re as _re
+
+    manifest = _json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))
+    declared = set(manifest.get("dependencies", [])) | set(
+        manifest.get("after_dependencies", [])
+    )
+
+    used: set[str] = set()
+    for path in COMPONENT.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        used |= set(_re.findall(r"from homeassistant\.components import (\w+)", source))
+        used |= set(_re.findall(r"from homeassistant\.components\.(\w+) import", source))
+
+    # Platforms the integration itself provides are not dependencies.
+    used -= {"sensor", "diagnostics"}
+
+    missing = used - declared
+    assert not missing, f"manifest does not declare: {sorted(missing)}"
+
+
+def test_mqtt_is_an_optional_dependency() -> None:
+    """MQTT must not be mandatory - the bridge is opt-in."""
+    import json as _json
+
+    manifest = _json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))
+    assert "mqtt" in manifest.get("after_dependencies", [])
+    assert "mqtt" not in manifest.get("dependencies", [])
+
+
+def test_brand_assets_are_present_and_valid() -> None:
+    """HACS checks the brands repository unless assets ship with the repo.
+
+    Its log names the path it looks for, so shipping them here satisfies the
+    check without a submission to home-assistant/brands.
+    """
+    import struct
+
+    brand = COMPONENT / "brand"
+    for name, expected in (
+        ("icon.png", 256),
+        ("icon@2x.png", 512),
+        ("logo.png", 256),
+        ("logo@2x.png", 512),
+    ):
+        path = brand / name
+        assert path.is_file(), f"missing brand asset {name}"
+        data = path.read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", f"{name} is not a PNG"
+        width, height = struct.unpack(">II", data[16:24])
+        assert (width, height) == (expected, expected), (
+            f"{name} is {width}x{height}, expected {expected}x{expected}"
+        )
