@@ -218,3 +218,31 @@ def test_manifest_version_matches_pyproject() -> None:
     assert declared.group(1) == manifest, (
         f"pyproject {declared.group(1)} != manifest {manifest}"
     )
+
+
+def test_workflows_do_not_pin_node20_actions() -> None:
+    """GitHub runners no longer provide Node 20.
+
+    Actions pinned to a major that declares `using: node20` are force-run on a
+    newer runtime and emit a deprecation warning. These floors are the first
+    major of each action that declares node24; raise them if GitHub deprecates
+    a further runtime.
+    """
+    import re as _re
+
+    node24_floor = {"checkout": 5, "setup-python": 6}
+
+    workflows = list((REPO_ROOT / ".github" / "workflows").glob("*.y*ml"))
+    assert workflows, "no workflows found"
+
+    for path in workflows:
+        for name, major in _re.findall(
+            r"uses:\s*actions/([a-z-]+)@v(\d+)", path.read_text(encoding="utf-8")
+        ):
+            floor = node24_floor.get(name)
+            if floor is None:
+                continue
+            assert int(major) >= floor, (
+                f"{path.name}: actions/{name}@v{major} runs on Node 20; "
+                f"use v{floor} or newer"
+            )

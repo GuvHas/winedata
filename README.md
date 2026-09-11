@@ -320,7 +320,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 171 tests
+python -m pytest          # 172 tests
 ruff check custom_components tests
 ```
 
