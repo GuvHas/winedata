@@ -18,3 +18,12 @@ next-env.d.ts
 .DS_Store
 npm-debug.log*
 tsconfig.tsbuildinfo
+
+# Python / Home Assistant integration
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/

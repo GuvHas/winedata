@@ -1,0 +1,28 @@
+trigger_sync:
+  name: Trigger sync
+  description: >-
+    Fetch the latest Munskänkarna reviews immediately, without waiting for the
+    next scheduled update.
+
+publish_mqtt:
+  name: Publish to MQTT
+  description: >-
+    Publish the current wine snapshot to MQTT. Requires the MQTT integration to
+    be configured.
+  fields:
+    topic:
+      name: Topic
+      description: Topic to publish to. Defaults to the configured base topic.
+      required: false
+      example: munskankarna/wines
+      selector:
+        text:
+    retain:
+      name: Retain
+      description: >-
+        Retain the message so subscribers receive it on connect. Recommended,
+        as it is what makes discovered entities survive a restart.
+      required: false
+      default: true
+      selector:
+        boolean:

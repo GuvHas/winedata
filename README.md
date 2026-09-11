@@ -26,6 +26,7 @@ npm run sync:wines   # fetch the latest reviews
 - [Project layout](#project-layout)
 - [Data model](#data-model)
 - [Testing and validation](#testing-and-validation)
+- [Home Assistant integration](#home-assistant-integration)
 - [Known limitations](#known-limitations)
 
 ---
@@ -356,6 +357,14 @@ the committed fixture and assert real invariants — that releases partition the
 wine set exactly, that price brackets neither overlap nor drop wines, that
 sorting is total and non-mutating, and that combined filters intersect.
 
+The Home Assistant integration adds 148 Python tests, built test-first
+(red → green → refactor) across five phases: parser, API/config flow,
+coordinator/sensors, MQTT bridge, and HACS/dashboard compliance. Notable
+coverage includes credential redaction in diagnostics, attribute payloads
+staying under 8 kB, states respecting Home Assistant's 255-character limit, and
+the Lovelace templates being rendered against live entity state so the
+dashboard cannot drift from the sensor attributes it reads.
+
 Verified in-browser during development (Chromium, light and dark, 390px and
 1440px):
 
@@ -370,6 +379,37 @@ alone (every badge is labelled), filter pills are real buttons with
 `aria-pressed`, sortable headers expose `aria-sort`, the result count is an
 `aria-live` region, zoom is not blocked, and `prefers-reduced-motion` is
 honoured.
+
+## Home Assistant integration
+
+This repository also ships a HACS-distributable Home Assistant integration in
+[`custom_components/munskankarna/`](custom_components/munskankarna/README.md),
+so the same reviews can drive a dashboard and automations.
+
+```
+custom_components/munskankarna/   HACS integration (Python, async)
+dashboard/                        Lovelace YAML, mobile + desktop views
+tests/test_*.py                   pytest suite (the *.test.ts files are the web app's)
+```
+
+It is an independent async port of the same parsing rules — `httpx` +
+BeautifulSoup rather than fetch + Cheerio — and both read the **same HTML
+fixtures** in `tests/fixtures/`. `tests/test_parity.py` asserts the two produce
+identical output, so the implementations cannot drift apart unnoticed.
+
+Sensors expose the current release per tasting type, the top pick, the Fynd
+count and the latest release date, each wine carrying its Systembolaget article
+number and product link. An optional MQTT bridge republishes the snapshot for
+consumers outside Home Assistant.
+
+```bash
+pip install -r requirements-test.txt
+python -m pytest          # 148 tests
+ruff check custom_components tests
+```
+
+See the [integration README](custom_components/munskankarna/README.md) for
+installation, options and example automations.
 
 ## Known limitations
 

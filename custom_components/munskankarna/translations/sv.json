@@ -1,0 +1,40 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Munskänkarna",
+        "description": "Vinlocus recensionssidor är öppna, så inloggning är valfri. Ange dina medlemsuppgifter endast om du behöver innehåll som kräver inloggning.",
+        "data": {
+          "base_url": "Bas-URL",
+          "username": "Användarnamn eller medlemsnummer",
+          "password": "Lösenord"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Kunde inte ansluta till Munskänkarna, eller så känns sidans layout inte igen.",
+      "invalid_auth": "Felaktigt användarnamn eller lösenord.",
+      "unknown": "Oväntat fel."
+    },
+    "abort": {
+      "already_configured": "Munskänkarna är redan konfigurerad."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Inställningar för Munskänkarna",
+        "data": {
+          "scan_interval_hours": "Uppdateringsintervall (timmar)",
+          "top_count": "Antal viner per sensor",
+          "kinds": "Provningar att följa"
+        },
+        "data_description": {
+          "scan_interval_hours": "Recensioner publiceras som mest en gång i veckan; 6 timmar räcker gott.",
+          "top_count": "Hålls medvetet lågt: attribut sparas i databasen och skickas till alla klienter vid varje uppdatering.",
+          "kinds": "Webbviner säljs av fristående webbhandlare och saknar artikelnummer hos Systembolaget."
+        }
+      }
+    }
+  }
+}

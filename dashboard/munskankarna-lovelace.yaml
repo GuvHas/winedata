@@ -1,0 +1,240 @@
+# Munskänkarna — Lovelace dashboard
+#
+# Everything below uses only built-in cards, so it works on a stock Home
+# Assistant with no HACS frontend dependencies. Optional variants using
+# auto-entities and flex-table-card are at the bottom.
+#
+# Install: Settings -> Dashboards -> + Add Dashboard -> three dots ->
+# "Raw configuration editor" -> paste.
+#
+# Entity ids assume a single config entry and default naming. Verify yours in
+# Developer Tools -> States (filter on "munskankarna").
+
+views:
+  # =======================================================================
+  # MOBILE — the companion-app view: this week's picks, one thumb-reach tap
+  # to the product page on Systembolaget.
+  # =======================================================================
+  - title: Veckans viner
+    path: viner
+    icon: mdi:glass-wine
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Veckans fynd
+            heading_style: title
+            icon: mdi:tag-heart
+
+          # Compact status row: what landed, when, and how much of it.
+          - type: glance
+            entities:
+              - entity: sensor.munskankarna_latest_release
+                name: Släppt
+              - entity: sensor.munskankarna_fynd
+                name: Fynd
+              - entity: sensor.munskankarna_wines_tested
+                name: Testade
+            state_color: false
+
+          # The headline pick. `state_color: false` keeps the score readable.
+          - type: markdown
+            content: >-
+              {% set s = 'sensor.munskankarna_top_pick' %}
+
+              {% if states(s) not in ['unknown','unavailable'] %}
+
+              ## 🏆 {{ states(s) }}
+
+              **{{ state_attr(s,'score') }}/20** ·
+              {{ state_attr(s,'producer') }} ·
+              {{ state_attr(s,'price') | round(0) }} kr
+
+              {% if state_attr(s,'url') %}[Öppna på
+              Systembolaget]({{ state_attr(s,'url') }}) ·
+              art. {{ state_attr(s,'article_number') }}{% endif %}
+
+              {% else %}
+
+              _Ingen data ännu._
+
+              {% endif %}
+
+          # Tillfälligt sortiment — the weekly release, as a tap-friendly list.
+          # Rendered as a markdown table so it stays legible at 390 px.
+          - type: markdown
+            content: >-
+              {% set s = 'sensor.munskankarna_tillfalligt_sortiment' %}
+
+              {% set wines = state_attr(s,'wines') or [] %}
+
+              ### {{ state_attr(s,'release_title') or 'Tillfälligt sortiment' }}
+
+              {% if wines %}
+
+              | | Vin | Pris |
+
+              |---:|---|---:|
+
+              {% for w in wines -%}
+
+              | **{{ w.score }}** | [{{ w.name }}{% if w.vintage %} {{ w.vintage
+              }}{% endif %}]({{ w.url or w.review_url }}){% if w.value == 'fynd'
+              %} ⭐{% endif %} | {{ w.price | round(0) }} kr |
+
+              {% endfor %}
+
+              _{{ state_attr(s,'release_date') }} ·
+              {{ states(s) }} viner totalt_
+
+              {% else %}
+
+              _Inga viner i den här provningen._
+
+              {% endif %}
+
+  # =======================================================================
+  # DESKTOP — denser, multi-column, with full detail per wine.
+  # =======================================================================
+  - title: Alla provningar
+    path: provningar
+    icon: mdi:table
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Status
+          - type: entities
+            entities:
+              - entity: sensor.munskankarna_latest_release
+                name: Senaste släpp
+                icon: mdi:calendar-star
+              - entity: sensor.munskankarna_wines_tested
+                name: Viner testade
+              - entity: sensor.munskankarna_fynd
+                name: Fynd totalt
+              - type: divider
+              - type: button
+                name: Uppdatera nu
+                icon: mdi:refresh
+                tap_action:
+                  action: perform-action
+                  perform_action: munskankarna.trigger_sync
+                  data: {}
+
+      # One column per tracked tasting type. Each renders the full attribute
+      # set, which is what the desktop width affords.
+      - type: grid
+        cards:
+          - type: heading
+            heading: Tillfälligt sortiment
+          - type: markdown
+            content: >-
+              {% set s = 'sensor.munskankarna_tillfalligt_sortiment' %}
+
+              {% set wines = state_attr(s,'wines') or [] %}
+
+              {% if wines %}
+
+              | Betyg | Vin | Ursprung | Pris | kr/l | |
+
+              |---:|---|---|---:|---:|---|
+
+              {% for w in wines -%}
+
+              | **{{ w.score }}** | {{ w.name }}{% if w.vintage %} {{ w.vintage
+              }}{% endif %}<br><sub>{{ w.producer }}</sub> | {{ w.country }}{%
+              if w.region %}, {{ w.region }}{% endif %} | {{ w.price | round(0)
+              }} kr | {{ w.price_per_litre | round(0) }} | {% if w.url
+              %}[🔗]({{ w.url }}){% endif %} |
+
+              {% endfor %}
+
+              {% else %}_Ingen data._{% endif %}
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Hitlistan
+          - type: markdown
+            content: >-
+              {% set s = 'sensor.munskankarna_hitlista' %}
+
+              {% set wines = state_attr(s,'wines') or [] %}
+
+              {% if wines %}
+
+              | Betyg | Vin | Pris | |
+
+              |---:|---|---:|---|
+
+              {% for w in wines -%}
+
+              | **{{ w.score }}** | {{ w.name }}<br><sub>{{ w.producer }}</sub>
+              | {{ w.price | round(0) }} kr | {% if w.url %}[🔗]({{ w.url
+              }}){% endif %} |
+
+              {% endfor %}
+
+              {% else %}_Ingen data._{% endif %}
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Endast fynd
+            icon: mdi:tag-heart
+          - type: markdown
+            content: >-
+              {% set wines = state_attr('sensor.munskankarna_fynd','wines') or []
+              %}
+
+              {% if wines %}
+
+              | Betyg | Vin | Pris | |
+
+              |---:|---|---:|---|
+
+              {% for w in wines -%}
+
+              | **{{ w.score }}** | {{ w.name }} | {{ w.price | round(0) }} kr |
+              {% if w.url %}[🔗]({{ w.url }}){% endif %} |
+
+              {% endfor %}
+
+              {% else %}_Inga fynd den här veckan._{% endif %}
+
+# ==========================================================================
+# OPTIONAL: custom cards (install via HACS -> Frontend)
+# ==========================================================================
+#
+# flex-table-card renders attribute lists as a real sortable table and is a
+# better fit than Markdown on desktop:
+#
+#   - type: custom:flex-table-card
+#     title: Tillfälligt sortiment
+#     entities:
+#       include: sensor.munskankarna_tillfalligt_sortiment
+#     sort_by: score-
+#     columns:
+#       - name: Betyg
+#         data: wines
+#         modify: x.score
+#       - name: Vin
+#         data: wines
+#         modify: x.name + (x.vintage ? ' ' + x.vintage : '')
+#       - name: Pris
+#         data: wines
+#         modify: x.price + ' kr'
+#       - name: Systembolaget
+#         data: wines
+#         modify: >-
+#           x.url ? '<a href="' + x.url + '" target="_blank">' +
+#           x.article_number + '</a>' : '—'
+#
+# auto-entities is NOT a good fit here: the wines live inside one entity's
+# attributes rather than as separate entities, so there is nothing for it to
+# glob over. Use flex-table-card or Markdown instead.

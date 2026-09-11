@@ -1,0 +1,40 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Munskänkarna",
+        "description": "The Vinlocus review pages are public, so credentials are optional. Provide your member login only if you need content that requires signing in.",
+        "data": {
+          "base_url": "Base URL",
+          "username": "Username or member number",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Munskänkarna, or the page layout was not recognised.",
+      "invalid_auth": "Invalid username or password.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "Munskänkarna is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Munskänkarna options",
+        "data": {
+          "scan_interval_hours": "Update interval (hours)",
+          "top_count": "Wines per sensor",
+          "kinds": "Tastings to track"
+        },
+        "data_description": {
+          "scan_interval_hours": "Reviews are published weekly at most; 6 hours is ample.",
+          "top_count": "Kept small on purpose: attributes are recorded and sent to every client on each update.",
+          "kinds": "Webbviner are sold by independent merchants and have no Systembolaget article number."
+        }
+      }
+    }
+  }
+}
