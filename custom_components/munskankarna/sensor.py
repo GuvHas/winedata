@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.core import HomeAssistant
@@ -32,6 +32,38 @@ from .const import (
 from .coordinator import MunskankarnaCoordinator
 from .parser import WineDict
 
+#: Characters that are structural in a Lovelace markdown card. The shipped
+#: dashboard interpolates these fields into table cells and link labels, so a
+#: "|" splits a row and a "]" closes a link label early — a scraped name of
+#: `Vin](javascript:alert(1))[x` otherwise renders as a working script link.
+_MARKDOWN_STRUCTURAL: Final = str.maketrans(
+    {
+        "|": "",
+        "[": "",
+        "]": "",
+        "<": "",
+        ">": "",
+        "`": "",
+        "\n": " ",
+        "\r": " ",
+        "\t": " ",
+    }
+)
+
+
+def markdown_safe(value: str | None) -> str | None:
+    """Neutralise markdown structure in scraped free text.
+
+    The characters are removed rather than backslash-escaped: these attributes
+    are also read by automations, templates and the MQTT bridge, where escape
+    slashes would be noise, and no genuine wine name, producer or region
+    contains them. Everything else — accents, ampersands, parentheses,
+    apostrophes — is left exactly as published.
+    """
+    if value is None:
+        return None
+    return " ".join(value.translate(_MARKDOWN_STRUCTURAL).split()) or None
+
 
 def wine_summary(wine: WineDict) -> dict[str, Any]:
     """Project a wine onto the fields a dashboard card actually renders.
@@ -40,10 +72,12 @@ def wine_summary(wine: WineDict) -> dict[str, Any]:
     would multiply the recorder cost of every update several times over.
     """
     return {
-        "name": wine.get("name"),
-        "full_name": wine.get("full_name"),
+        # Free text is scraped, so it is sanitised on the way out; numbers,
+        # enums and URLs are already constrained by the parser.
+        "name": markdown_safe(wine.get("name")),
+        "full_name": markdown_safe(wine.get("full_name")),
         "vintage": wine.get("vintage"),
-        "producer": wine.get("producer"),
+        "producer": markdown_safe(wine.get("producer")),
         "score": wine.get("score"),
         "band": wine.get("band"),
         "value": wine.get("value_rating"),
@@ -51,9 +85,9 @@ def wine_summary(wine: WineDict) -> dict[str, Any]:
         "price_per_litre": wine.get("price_per_litre"),
         "volume_ml": wine.get("volume_ml"),
         "color": wine.get("color"),
-        "country": wine.get("country"),
-        "region": wine.get("region"),
-        "grapes": wine.get("grapes"),
+        "country": markdown_safe(wine.get("country")),
+        "region": markdown_safe(wine.get("region")),
+        "grapes": [g for g in (markdown_safe(x) for x in wine.get("grapes") or []) if g],
         "article_number": wine.get("article_number"),
         "url": wine.get("product_url"),
         "review_url": wine.get("review_url"),
@@ -243,10 +277,10 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
             "kind": self._kind,
             "kind_label": KIND_LABELS.get(self._kind, self._kind),
             "release_id": release["id"],
-            "release_title": release["title"],
+            "release_title": markdown_safe(release["title"]),
             "release_date": release["date"],
             "release_url": release["url"],
-            "summary": release["summary"],
+            "summary": markdown_safe(release["summary"]),
             "wines": [
                 wine_summary(w) for w in self.coordinator.top_wines(self._kind)
             ],
