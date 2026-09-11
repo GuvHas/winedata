@@ -7,18 +7,13 @@ from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.core import callback
-
-try:  # Home Assistant >= 2024.4
-    from homeassistant.config_entries import ConfigFlowResult
-except ImportError:  # pragma: no cover - older cores
-    from homeassistant.data_entry_flow import FlowResult as ConfigFlowResult
-try:  # Home Assistant builds this context once, at startup, off the event loop.
-    from homeassistant.util.ssl import get_default_context
-except ImportError:  # pragma: no cover - very old cores
-    get_default_context = None  # type: ignore[assignment]
-
 from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
@@ -28,6 +23,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.util.ssl import get_default_context
 
 from .api import CannotConnect, InvalidAuth, async_validate_credentials
 from .const import (
@@ -114,7 +110,7 @@ class MunskankarnaConfigFlow(ConfigFlow, domain=DOMAIN):
                     base_url,
                     username,
                     password,
-                    verify=get_default_context() if get_default_context is not None else None,
+                    verify=get_default_context(),
                 )
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
@@ -167,7 +163,7 @@ class MunskankarnaConfigFlow(ConfigFlow, domain=DOMAIN):
                     base_url,
                     user_input[CONF_USERNAME],
                     user_input[CONF_PASSWORD],
-                    verify=get_default_context() if get_default_context is not None else None,
+                    verify=get_default_context(),
                 )
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
@@ -193,20 +189,11 @@ class MunskankarnaConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> MunskankarnaOptionsFlow:
         """Return the options flow handler."""
-        return MunskankarnaOptionsFlow(config_entry)
+        return MunskankarnaOptionsFlow()
 
 
 class MunskankarnaOptionsFlow(OptionsFlow):
     """Adjust polling cadence, attribute size and which tastings are tracked."""
-
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Keep the entry on a private attribute.
-
-        Home Assistant >= 2024.11 injects `self.config_entry` and deprecates
-        assigning it, while older cores never set it at all. Storing it under a
-        private name works on every version and trips no deprecation warning.
-        """
-        self._entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -215,7 +202,7 @@ class MunskankarnaOptionsFlow(OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        options = self._entry.options
+        options = self.config_entry.options
         schema = vol.Schema(
             {
                 vol.Optional(

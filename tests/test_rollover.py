@@ -44,7 +44,7 @@ async def test_sensor_rolls_over_to_next_weeks_release(hass: HomeAssistant) -> N
         # Munskänkarna publishes next week's tasting; it appears on the index.
         index.insert(0, build_release(WEEK2, KIND_TILLFALLIGT, "2026-09-18"))
 
-        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator = entry.runtime_data
         await coordinator.async_refresh()
         await hass.async_block_till_done()
 
@@ -70,6 +70,6 @@ async def test_undated_release_does_not_displace_a_dated_one(hass: HomeAssistant
           patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_release)):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
-        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator = entry.runtime_data
         chosen = coordinator.release_for(KIND_TILLFALLIGT)["release"]["id"]
         assert chosen == WEEK1

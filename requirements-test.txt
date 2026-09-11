@@ -1,10 +1,11 @@
 # Test toolchain for the Home Assistant integration.
 #
-# Pinned to Python 3.12: pytest-homeassistant-custom-component pins
-# numpy==1.26.0, which ships no cp313 wheel and would need a source build.
-pytest-homeassistant-custom-component==0.13.109
+# Two pins matter here, and they move together:
+#   0.13.195 -> Home Assistant 2024.12.5 (the declared minimum), Python 3.12
+#   0.13.355 -> Home Assistant 2026.8.1  (the primary target), Python 3.14.2+
+# CI runs both. This file installs the floor; see .github/workflows/hacs.yaml.
+pytest-homeassistant-custom-component==0.13.195
 beautifulsoup4>=4.12.0
-lxml>=5.0.0
 respx>=0.20.2
 ruff>=0.6.0
 tzdata>=2024.1

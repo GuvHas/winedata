@@ -34,14 +34,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The pinned floor declared in hacs.json.
-          - label: "2024.3 (minimum)"
+          # The minimum declared in hacs.json.
+          - label: "2024.12 (minimum)"
             python: "3.12"
-            phacc: "==0.13.109"
+            phacc: "==0.13.195"
+          # The primary target.
+          - label: "2026.8 (target)"
+            python: "3.14"
+            phacc: "==0.13.355"
           # Whatever Home Assistant ships today, so a breaking core change is
           # caught by the weekly run instead of by users.
           - label: "latest"
-            python: "3.13"
+            python: "3.14"
             phacc: ""
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +55,7 @@ jobs:
       - name: Install
         run: |
           pip install "pytest-homeassistant-custom-component${{ matrix.phacc }}"
-          pip install beautifulsoup4 lxml respx ruff tzdata
+          pip install beautifulsoup4 respx ruff tzdata
       - run: ruff check custom_components tests
       - run: python -m pytest -q
 
@@ -59,14 +63,14 @@ jobs:
     # The parser and HTTP client depend on nothing from Home Assistant, so they
     # can be verified on the Python version current HA requires (3.14) even
     # before the test harness supports it.
-    name: Parser & API on Python 3.14
+    name: Parser & API without Home Assistant
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install beautifulsoup4 lxml httpx respx pytest pytest-asyncio
+      - run: pip install beautifulsoup4 httpx respx pytest pytest-asyncio
       - name: Run HA-independent suites
         run: |
           mkdir -p /tmp/core/tests /tmp/core/custom_components/munskankarna

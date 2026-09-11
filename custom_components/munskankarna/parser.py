@@ -313,8 +313,13 @@ def build_search_url(query: str) -> str:
 
 
 def _soup(html: str) -> BeautifulSoup:
-    """Parse with lxml, which is both fast and lenient about broken markup."""
-    return BeautifulSoup(html or "", "lxml")
+    """Parse with the stdlib backend.
+
+    `html.parser` needs no compiled dependency, which matters for Home
+    Assistant OS and Alpine installs, and yields identical results to lxml on
+    this site — checked field by field against full live release pages.
+    """
+    return BeautifulSoup(html or "", "html.parser")
 
 
 def _release_slug_from_href(href: str) -> str | None:

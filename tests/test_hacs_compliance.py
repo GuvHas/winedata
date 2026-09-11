@@ -133,3 +133,35 @@ def test_component_imports_no_test_only_dependencies() -> None:
     for path in COMPONENT.glob("*.py"):
         source = path.read_text(encoding="utf-8")
         assert "import pytest" not in source, f"{path.name} imports pytest"
+
+
+def test_license_file_exists() -> None:
+    """HACS expects a license at the repository root."""
+    candidates = [REPO_ROOT / name for name in ("LICENSE", "LICENSE.md", "LICENSE.txt")]
+    assert any(path.is_file() for path in candidates), "no LICENSE file at the repo root"
+
+
+def test_repository_is_lean() -> None:
+    """No web-app or Node scaffolding should remain alongside the integration."""
+    forbidden = [
+        "package.json", "package-lock.json", "tsconfig.json", "next.config.ts",
+        "postcss.config.mjs", "eslint.config.mjs", "node_modules",
+    ]
+    present = [name for name in forbidden if (REPO_ROOT / name).exists()]
+    assert not present, f"leftover Node/web scaffolding: {present}"
+
+    for directory in ("app", "components", "lib", "seeds", "types"):
+        assert not (REPO_ROOT / directory).exists(), f"leftover directory: {directory}/"
+
+
+def test_hacs_minimum_matches_declared_support() -> None:
+    """hacs.json's floor must be a version the integration is actually tested on."""
+    import json as _json
+
+    config = _json.loads((REPO_ROOT / "hacs.json").read_text(encoding="utf-8"))
+    assert config["homeassistant"] == "2024.12.0"
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "hacs.yaml").read_text(encoding="utf-8")
+    # The floor and the target must both appear in the CI matrix.
+    assert "0.13.195" in workflow, "CI does not test the declared minimum"
+    assert "0.13.355" in workflow, "CI does not test the 2026.8 target"

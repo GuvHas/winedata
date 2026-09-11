@@ -250,7 +250,7 @@ class MunskankarnaClient:
     @staticmethod
     def _extract_login_tokens(html: str) -> tuple[str | None, str | None]:
         """Pull the antiforgery and Umbraco form tokens out of the login form."""
-        soup = BeautifulSoup(html, "lxml")
+        soup = BeautifulSoup(html, "html.parser")
         form = soup.select_one("form.js-login") or soup.find("form")
         if form is None:
             return None, None
@@ -274,7 +274,7 @@ class MunskankarnaClient:
                 if any(hint in name for hint in _AUTH_COOKIE_HINTS) and cookie.value:
                     return True
 
-        soup = BeautifulSoup(response.text, "lxml")
+        soup = BeautifulSoup(response.text, "html.parser")
         still_showing_form = soup.find("input", attrs={"name": "Password"}) is not None
         return not still_showing_form
 

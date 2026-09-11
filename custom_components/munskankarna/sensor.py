@@ -16,12 +16,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import MunskankarnaConfigEntry
 from .const import (
     DEFAULT_NAME,
     DOMAIN,
@@ -146,11 +146,11 @@ GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: MunskankarnaConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the sensors for a config entry."""
-    coordinator: MunskankarnaCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
 
     entities: list[SensorEntity] = [
         MunskankarnaGlobalSensor(coordinator, entry, description)
@@ -169,7 +169,9 @@ class MunskankarnaEntity(CoordinatorEntity[MunskankarnaCoordinator], SensorEntit
 
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator: MunskankarnaCoordinator, entry: ConfigEntry) -> None:
+    def __init__(
+        self, coordinator: MunskankarnaCoordinator, entry: MunskankarnaConfigEntry
+    ) -> None:
         super().__init__(coordinator)
         self._entry = entry
         self._attr_device_info = DeviceInfo(
@@ -190,7 +192,7 @@ class MunskankarnaGlobalSensor(MunskankarnaEntity):
     def __init__(
         self,
         coordinator: MunskankarnaCoordinator,
-        entry: ConfigEntry,
+        entry: MunskankarnaConfigEntry,
         description: MunskankarnaSensorDescription,
     ) -> None:
         super().__init__(coordinator, entry)
@@ -213,7 +215,7 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
     _attr_native_unit_of_measurement = "viner"
 
     def __init__(
-        self, coordinator: MunskankarnaCoordinator, entry: ConfigEntry, kind: str
+        self, coordinator: MunskankarnaCoordinator, entry: MunskankarnaConfigEntry, kind: str
     ) -> None:
         super().__init__(coordinator, entry)
         self._kind = kind

@@ -68,7 +68,11 @@ async def coordinator(hass: HomeAssistant) -> MunskankarnaCoordinator:
         patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
     ):
         coord = MunskankarnaCoordinator(hass, entry)
-        await coord.async_config_entry_first_refresh()
+        # async_refresh(), not async_config_entry_first_refresh(): from HA
+        # 2025.x the latter asserts the entry is in SETUP_IN_PROGRESS, and this
+        # fixture populates a coordinator directly rather than setting the
+        # entry up.
+        await coord.async_refresh()
     return coord
 
 

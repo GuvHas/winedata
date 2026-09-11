@@ -21,17 +21,20 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
+#: The coordinator lives on `entry.runtime_data`, so the entry type carries it.
+#: Platforms annotate their entry with this and get a typed coordinator for free.
+type MunskankarnaConfigEntry = ConfigEntry[MunskankarnaCoordinator]
+
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the domain-level service handlers (registered once)."""
-    hass.data.setdefault(DOMAIN, {})
     _async_register_services(hass)
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry) -> bool:
     """Set up Munskänkarna from a config entry."""
     coordinator = MunskankarnaCoordinator(hass, entry)
 
@@ -39,38 +42,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # backoff instead of publishing entities full of misleading zeros.
     await coordinator.async_config_entry_first_refresh()
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    _async_register_services(hass)
+    # Stored on the entry itself rather than in hass.data: Home Assistant
+    # clears it automatically on unload, and platforms get it typed.
+    entry.runtime_data = coordinator
 
+    _async_register_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry) -> bool:
     """Unload a config entry."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
-        # Remove the services along with the last entry.
-        if not hass.data[DOMAIN]:
-            for service in (SERVICE_TRIGGER_SYNC, SERVICE_PUBLISH_MQTT):
-                if hass.services.has_service(DOMAIN, service):
-                    hass.services.async_remove(DOMAIN, service)
+    if unloaded and not _loaded_entries(hass):
+        # Services are domain-wide, so they go with the last remaining entry.
+        for service in (SERVICE_TRIGGER_SYNC, SERVICE_PUBLISH_MQTT):
+            if hass.services.has_service(DOMAIN, service):
+                hass.services.async_remove(DOMAIN, service)
     return unloaded
 
 
-async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def async_reload_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry) -> None:
     """Reload when the options change (interval, tracked kinds, list size)."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
-def _coordinators(hass: HomeAssistant) -> list[MunskankarnaCoordinator]:
+def _loaded_entries(hass: HomeAssistant) -> list[MunskankarnaConfigEntry]:
+    """Entries that are still loaded, excluding one being unloaded right now."""
     return [
-        value
-        for value in hass.data.get(DOMAIN, {}).values()
-        if isinstance(value, MunskankarnaCoordinator)
+        entry
+        for entry in hass.config_entries.async_loaded_entries(DOMAIN)
+        if isinstance(getattr(entry, "runtime_data", None), MunskankarnaCoordinator)
     ]
+
+
+def _coordinators(hass: HomeAssistant) -> list[MunskankarnaCoordinator]:
+    return [entry.runtime_data for entry in _loaded_entries(hass)]
 
 
 def _async_register_services(hass: HomeAssistant) -> None:

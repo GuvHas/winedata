@@ -368,3 +368,25 @@ def test_parse_wine_detail_adds_the_importer(load_fixture_html) -> None:
 
 def test_parse_wine_detail_handles_empty_html() -> None:
     assert parse_wine_detail("") == {}
+
+
+def test_parser_uses_only_stdlib_html_parsing() -> None:
+    """No compiled parser dependency.
+
+    BeautifulSoup's "lxml" backend needs a compiled wheel, which is a poor fit
+    for Home Assistant OS/Alpine installs. The stdlib "html.parser" backend
+    produces identical results on this site (verified against full live release
+    pages), so the integration ships without lxml.
+    """
+    import pathlib
+    import re
+
+    component = pathlib.Path(__file__).resolve().parents[1] / "custom_components" / "munskankarna"
+    # Look for real usage - a quoted backend name or an import - rather than
+    # the bare word, which legitimately appears in explanatory comments.
+    usage = re.compile(r"""["']lxml["']|\bimport\s+lxml|\bfrom\s+lxml\b""")
+    for path in component.glob("*.py"):
+        assert not usage.search(path.read_text(encoding="utf-8")), f"{path.name} uses lxml"
+
+    manifest = (component / "manifest.json").read_text(encoding="utf-8")
+    assert "lxml" not in manifest, "manifest.json still requires lxml"
