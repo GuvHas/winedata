@@ -38,6 +38,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import ssl
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from types import TracebackType
 from typing import Any, Final, Self
 
@@ -67,6 +69,18 @@ _AUTH_COOKIE_HINTS: Final[tuple[str, ...]] = ("identity", "aspxauth", "umb_", "m
 
 #: Politeness delay between consecutive requests, in seconds.
 _REQUEST_SPACING: Final = 0.75
+
+#: Attempts per request, including the first. Server errors are usually
+#: transient and a poll runs only every few hours, so one retry is worth it;
+#: more would just prolong an outage.
+_MAX_ATTEMPTS: Final = 2
+
+#: Base seconds for exponential backoff between attempts.
+_RETRY_BACKOFF: Final = 2.0
+
+#: Status codes worth a second attempt. 429 is deliberately absent: being told
+#: to slow down is not an invitation to retry.
+_RETRYABLE_STATUS: Final[frozenset[int]] = frozenset({500, 502, 503, 504})
 
 #: Process-wide cache for the fallback SSL context. Building one reads the CA
 #: bundle from disk, so it is done once, in a worker thread. A benign race here
@@ -99,6 +113,18 @@ class InvalidAuth(MunskankarnaError):
     """The supplied member credentials were rejected."""
 
 
+class RateLimited(MunskankarnaError):
+    """The site asked us to slow down (HTTP 429).
+
+    Distinct from CannotConnect so callers can abandon the rest of the cycle
+    instead of continuing to request from a server that just pushed back.
+    """
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class MunskankarnaClient:
     """Fetches and parses Munskänkarna's Vinlocus review pages."""
 
@@ -109,6 +135,7 @@ class MunskankarnaClient:
         password: str | None = None,
         client: httpx.AsyncClient | None = None,
         verify: ssl.SSLContext | bool | None = None,
+        retry_backoff: float = _RETRY_BACKOFF,
     ) -> None:
         """Store configuration. The HTTP client is created lazily on entry.
 
@@ -126,6 +153,7 @@ class MunskankarnaClient:
         self._client = client
         self._owns_client = client is None
         self._verify = verify
+        self._retry_backoff = retry_backoff
         self._authenticated = False
         self._last_request = 0.0
 
@@ -184,21 +212,44 @@ class MunskankarnaClient:
         self._last_request = loop.time()
 
     async def fetch_text(self, path: str) -> str:
-        """GET a page as text, normalising every failure to `CannotConnect`."""
+        """GET a page as text.
+
+        Retries transient server errors with exponential backoff. A 429 raises
+        `RateLimited` immediately — retrying a rate limit is the one thing that
+        makes it worse — and every other failure becomes `CannotConnect`.
+        """
         if self._client is None:
             raise RuntimeError("MunskankarnaClient must be used as an async context manager")
 
-        await self._throttle()
-        try:
-            response = await self._client.get(self._url(path))
-            response.raise_for_status()
-        except httpx.HTTPStatusError as err:
-            raise CannotConnect(
-                f"HTTP {err.response.status_code} for {self._url(path)}"
-            ) from err
-        except httpx.HTTPError as err:
-            raise CannotConnect(f"Request to {self._url(path)} failed: {err}") from err
-        return response.text
+        url = self._url(path)
+        last_error: Exception | None = None
+
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            await self._throttle()
+            try:
+                response = await self._client.get(url)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as err:
+                status = err.response.status_code
+                if status == 429:
+                    retry_after = _parse_retry_after(err.response.headers.get("Retry-After"))
+                    raise RateLimited(
+                        f"Rate limited by {url}"
+                        + (f"; retry after {retry_after:.0f}s" if retry_after else ""),
+                        retry_after,
+                    ) from err
+                last_error = CannotConnect(f"HTTP {status} for {url}")
+                if status not in _RETRYABLE_STATUS:
+                    raise last_error from err
+            except httpx.HTTPError as err:
+                last_error = CannotConnect(f"Request to {url} failed: {err}")
+            else:
+                return response.text
+
+            if attempt < _MAX_ATTEMPTS and self._retry_backoff:
+                await asyncio.sleep(self._retry_backoff * attempt)
+
+        raise last_error or CannotConnect(f"Request to {url} failed")
 
     # -- authentication ----------------------------------------------------
 
@@ -318,6 +369,15 @@ class MunskankarnaClient:
         for release in releases:
             try:
                 results.append(await self.async_fetch_release(release["id"], release["title"]))
+            except RateLimited as err:
+                # Abandon the cycle: continuing would keep hitting a server
+                # that has just asked us to back off.
+                errors.append(f"{release['id']}: {err}")
+                _LOGGER.warning(
+                    "Rate limited while fetching %s; abandoning this update cycle",
+                    release["id"],
+                )
+                break
             except MunskankarnaError as err:
                 errors.append(f"{release['id']}: {err}")
                 _LOGGER.warning("Could not fetch release %s: %s", release["id"], err)
@@ -345,3 +405,25 @@ async def async_validate_credentials(
             "authenticated": client.authenticated,
             "release_count": len(releases),
         }
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a Retry-After header, which may be seconds or an HTTP date."""
+    if not value:
+        return None
+
+    raw = value.strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0.0, (when - datetime.now(UTC)).total_seconds())

@@ -17,7 +17,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.ssl import get_default_context
 
-from .api import InvalidAuth, MunskankarnaClient, MunskankarnaError
+from .api import InvalidAuth, MunskankarnaClient, MunskankarnaError, RateLimited
 from .const import (
     CONF_BASE_URL,
     CONF_KINDS,
@@ -188,6 +188,10 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Fetch the index and every configured release using the active client."""
         try:
             index = await self._async_fetch_index()
+        except RateLimited as err:
+            raise UpdateFailed(
+                f"Rate limited by Munskänkarna: {err}. Consider a longer update interval."
+            ) from err
         except MunskankarnaError as err:
             raise UpdateFailed(f"Could not fetch the Munskänkarna release index: {err}") from err
 
@@ -204,6 +208,16 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for kind, release in wanted.items():
             try:
                 result = await self._async_fetch_release(release["id"], release["title"])
+            except RateLimited as err:
+                # Stop the cycle rather than keep requesting from a server that
+                # has just asked us to back off. Whatever loaded before the
+                # limit is still published.
+                warnings.append(f"{release['id']}: {err}")
+                _LOGGER.warning(
+                    "Rate limited fetching %s; abandoning the rest of this update",
+                    release["id"],
+                )
+                break
             except MunskankarnaError as err:
                 # One bad release must not blank the other sensors.
                 warnings.append(f"{release['id']}: {err}")
