@@ -297,8 +297,25 @@ def slugify(value: str) -> str:
 
 
 def normalize_article_number(value: str | None) -> str | None:
-    """Article numbers are digits only; reject anything implausible."""
-    digits = re.sub(r"\D", "", clean(value))
+    """Extract a Systembolaget article number, or None if there is not one.
+
+    Takes the first run of digits rather than stripping every non-digit: the
+    old behaviour welded package suffixes onto the number, turning
+    "9049001 (2-pack)" into "90490012" — a valid-looking number pointing at an
+    unrelated product. A wrong link is worse than no link.
+
+    Leading zeros are dropped because Systembolaget's URLs carry none, and an
+    all-zero or too-short run is rejected outright.
+    """
+    text = clean(value)
+    if not text:
+        return None
+
+    match = re.search(r"\d+", text)
+    if match is None:
+        return None
+
+    digits = match.group().lstrip("0")
     return digits if 3 <= len(digits) <= 10 else None
 
 
@@ -464,6 +481,14 @@ def _parse_origin(card: Tag) -> tuple[str | None, str | None, str | None]:
     )
 
 
+#: Paths on systembolaget.se whose trailing digits are a product id. Anything
+#: else — /sortiment/2020, a search or a campaign page — must not be scraped
+#: for a number, or a vintage becomes an article number.
+_PRODUCT_HREF = re.compile(
+    r"systembolaget\.se/(?:produkt/[^/]+/)?(\d{4,10})/?(?:[?#].*)?$", re.I
+)
+
+
 def _parse_article_number(card: Tag) -> str | None:
     """Article number from the Systembolaget link, or from adjacent text."""
     link = card.select_one('a[href*="systembolaget.se"]')
@@ -472,7 +497,7 @@ def _parse_article_number(card: Tag) -> str | None:
         if number := normalize_article_number(_text_of(span) or clean(link.get_text())):
             return number
         # Matches https://systembolaget.se/9049001 and /produkt/vin/.../9049001/
-        if match := re.search(r"(\d{4,10})/?(?:[?#].*)?$", link.get("href", "")):
+        if match := _PRODUCT_HREF.search(link.get("href", "")):
             return normalize_article_number(match.group(1))
 
     if match := re.search(r"Systembolaget:?\s*(\d{4,10})", clean(card.get_text()), re.I):
