@@ -5,8 +5,9 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Weekly, so an upstream markup change at Munskänkarna surfaces on its own
-    # rather than the first time someone opens their dashboard.
+    # Weekly, so an upstream markup change at Munskänkarna — or a breaking
+    # Home Assistant release — surfaces here rather than on someone's
+    # dashboard.
     - cron: "0 6 * * 1"
 
 jobs:
@@ -27,13 +28,54 @@ jobs:
       - uses: home-assistant/actions/hassfest@master
 
   tests:
-    name: Python tests
+    name: Tests (HA ${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The pinned floor declared in hacs.json.
+          - label: "2024.3 (minimum)"
+            python: "3.12"
+            phacc: "==0.13.109"
+          # Whatever Home Assistant ships today, so a breaking core change is
+          # caught by the weekly run instead of by users.
+          - label: "latest"
+            python: "3.13"
+            phacc: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          pip install "pytest-homeassistant-custom-component${{ matrix.phacc }}"
+          pip install beautifulsoup4 lxml respx ruff tzdata
+      - run: ruff check custom_components tests
+      - run: python -m pytest -q
+
+  core-only:
+    # The parser and HTTP client depend on nothing from Home Assistant, so they
+    # can be verified on the Python version current HA requires (3.14) even
+    # before the test harness supports it.
+    name: Parser & API on Python 3.14
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: pip install -r requirements-test.txt
-      - run: ruff check custom_components tests
-      - run: python -m pytest -q
+          python-version: "3.14"
+      - run: pip install beautifulsoup4 lxml httpx respx pytest pytest-asyncio
+      - name: Run HA-independent suites
+        run: |
+          mkdir -p /tmp/core/tests /tmp/core/custom_components/munskankarna
+          : > /tmp/core/custom_components/__init__.py
+          : > /tmp/core/custom_components/munskankarna/__init__.py
+          cp custom_components/munskankarna/{parser,api,const}.py \
+             /tmp/core/custom_components/munskankarna/
+          cp tests/test_parser.py tests/test_api.py /tmp/core/tests/
+          cp -r tests/fixtures /tmp/core/tests/
+          printf 'from pathlib import Path\nimport pytest\n\n@pytest.fixture\ndef load_fixture_html():\n    def _load(name):\n        return (Path(__file__).parent / "fixtures" / name).read_text(encoding="utf-8")\n    return _load\n' > /tmp/core/tests/conftest.py
+          printf '[pytest]\nasyncio_mode = auto\n' > /tmp/core/pytest.ini
+          cd /tmp/core && python -m pytest tests -q

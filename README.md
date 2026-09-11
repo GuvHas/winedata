@@ -402,6 +402,11 @@ count and the latest release date, each wine carrying its Systembolaget article
 number and product link. An optional MQTT bridge republishes the snapshot for
 consumers outside Home Assistant.
 
+Releases roll over on their own: each poll re-reads the index and selects the
+newest dated release per tasting type, so next week's *Tillfälligt sortiment*
+is picked up without reconfiguration and the `entity_id` never changes.
+Compatible with Home Assistant 2024.3 through 2026.x on Python 3.12–3.14.
+
 ```bash
 pip install -r requirements-test.txt
 python -m pytest          # 148 tests

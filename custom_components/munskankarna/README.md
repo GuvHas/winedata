@@ -18,6 +18,31 @@ Systembolaget releases on a 20-point scale and flags price/quality with
 - `munskankarna.trigger_sync` service for on-demand refresh
 - Full UI configuration, English and Swedish translations
 
+## Compatibility
+
+| | |
+|---|---|
+| Home Assistant | **2024.3 → 2026.x** |
+| Python | 3.12 – 3.14 |
+| Dependencies | `httpx`, `beautifulsoup4`, `lxml` — all ship wheels for 3.14 |
+
+Verified against Home Assistant's `dev` branch (2026.10): every core API this
+integration uses is still present, and the parser and HTTP client pass their
+full suites on Python 3.14 (which HA 2026.10 requires).
+
+Two compatibility shims keep the same code working across that range:
+
+- `ConfigFlowResult` is imported with a fallback to `FlowResult`, since the
+  former only exists from 2024.4.
+- The options flow keeps its entry on a private attribute. Home Assistant
+  2024.11+ turned `OptionsFlow.config_entry` into a read-only property, so
+  assigning it — the old idiom — now fails; never touching it works everywhere.
+- `config_entry=` is passed to `DataUpdateCoordinator` when the running core
+  accepts it (2024.12+), and omitted otherwise.
+
+CI runs the suite against both the declared minimum and whatever Home Assistant
+ships today, weekly, so a breaking core change surfaces here first.
+
 ## Installation
 
 ### HACS (recommended)
@@ -53,6 +78,25 @@ real Umbraco member login (replaying the `__RequestVerificationToken` and
 **Webbviner are excluded by default** because those wines are sold by
 independent web merchants (Supervin, Vinupplevelser) and have **no Systembolaget
 article number** — they would render as unlinkable rows.
+
+## Does it follow new releases automatically?
+
+Yes. Every update cycle (6 hours by default) the integration re-reads
+Munskänkarna's release index and selects the **newest dated release per tasting
+type**. When next week's *Tillfälligt sortiment* is published it is picked up on
+the following poll, and the existing sensor switches to it — same `entity_id`,
+same attributes, no reconfiguration. Dashboards and automations keep working
+untouched. This is covered by `tests/test_rollover.py`.
+
+Two caveats worth knowing:
+
+- A release whose title carries **no parseable date** will not displace a dated
+  one. That is deliberate — it prevents an oddly-titled special from hiding the
+  current week — but it does mean such a release would be skipped.
+- Sensors are created for the tasting types that loaded **at setup time**. If
+  you enable a new tasting type in the options, the entry reloads and the
+  sensor appears. If a type was failing when you first set the integration up,
+  reload the entry once it recovers.
 
 ## Entities
 

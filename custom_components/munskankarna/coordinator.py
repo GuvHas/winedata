@@ -7,6 +7,7 @@ then thin projections over that prepared shape.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import datetime, timedelta
 from typing import Any, TypedDict
@@ -36,6 +37,19 @@ _LOGGER = logging.getLogger(__name__)
 
 #: Unrated wines sort last, whichever direction is being applied.
 _UNRATED_RANK = len(VALUE_ORDER) + 1
+
+#: Home Assistant 2024.12+ accepts `config_entry=` on DataUpdateCoordinator and
+#: reports integrations that rely on the ContextVar fallback instead. It is only
+#: a warning for custom integrations, but passing it explicitly is correct — and
+#: older cores reject the keyword outright, hence the probe.
+_COORDINATOR_ACCEPTS_CONFIG_ENTRY = (
+    "config_entry" in inspect.signature(DataUpdateCoordinator.__init__).parameters
+)
+
+
+def coordinator_init_kwargs(entry: ConfigEntry) -> dict[str, Any]:
+    """Extra DataUpdateCoordinator kwargs supported by the running core."""
+    return {"config_entry": entry} if _COORDINATOR_ACCEPTS_CONFIG_ENTRY else {}
 
 
 class CoordinatorData(TypedDict):
@@ -105,6 +119,7 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             _LOGGER,
             name=DOMAIN,
             update_interval=interval,
+            **coordinator_init_kwargs(entry),
         )
 
     # -- configuration -----------------------------------------------------

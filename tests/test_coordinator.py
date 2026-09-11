@@ -197,3 +197,51 @@ async def test_top_count_limits_the_exposed_wines(hass: HomeAssistant) -> None:
     # The coordinator keeps the full release; the cap is applied when building
     # attributes, so counts stay truthful.
     assert data["releases"][KIND_TILLFALLIGT]["release"]["wine_count"] == 10
+
+
+async def test_coordinator_passes_config_entry_when_core_supports_it(
+    hass: HomeAssistant,
+) -> None:
+    """Newer cores want the entry passed explicitly rather than read from a ContextVar.
+
+    Home Assistant 2024.12+ accepts `config_entry=` on DataUpdateCoordinator and
+    reports reliance on the ContextVar fallback. It is only a warning for custom
+    integrations, but passing it is correct and future-proofs the integration.
+    """
+    import inspect
+
+    from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+    entry = create_entry(hass)
+    coordinator = MunskankarnaCoordinator(hass, entry)
+
+    supported = "config_entry" in inspect.signature(DataUpdateCoordinator.__init__).parameters
+    if supported:
+        assert coordinator.config_entry is entry
+    else:
+        # On older cores the attribute simply does not exist; the integration
+        # keeps its own reference either way.
+        assert coordinator.entry is entry
+
+
+def test_coordinator_init_kwargs_adapts_to_the_running_core(hass: HomeAssistant) -> None:
+    """The compat probe must yield the right kwargs for either core generation."""
+    import inspect
+
+    from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+    from custom_components.munskankarna.coordinator import coordinator_init_kwargs
+
+    entry = create_entry(hass)
+    kwargs = coordinator_init_kwargs(entry)
+    supported = "config_entry" in inspect.signature(DataUpdateCoordinator.__init__).parameters
+
+    if supported:
+        assert kwargs == {"config_entry": entry}
+    else:
+        assert kwargs == {}
+
+    # Whatever the core accepts, the kwargs must be usable verbatim.
+    signature = inspect.signature(DataUpdateCoordinator.__init__)
+    for key in kwargs:
+        assert key in signature.parameters
