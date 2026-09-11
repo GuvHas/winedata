@@ -114,6 +114,21 @@ class ParseResult(TypedDict):
 # ---------------------------------------------------------------------------
 
 
+#: Upper bound on text handed to the small field parsers. A score, price,
+#: volume or alcohol reading is a handful of characters; a name is short. The
+#: parsers use patterns whose cost grows quadratically with the length of a
+#: digit run, and Python refuses to convert integers beyond 4300 digits at all,
+#: so scraped text is truncated before it reaches them. Measured before this
+#: bound: ~10s of event-loop stall on a 40k input, and a ValueError from
+#: int() on a 5000-digit run.
+_MAX_FIELD_CHARS: Final = 200
+
+
+def _bounded(value: str | None) -> str:
+    """Clean a scraped value and cap its length for the field parsers."""
+    return clean(value)[:_MAX_FIELD_CHARS]
+
+
 def clean(value: str | None) -> str:
     """Collapse whitespace (including non-breaking spaces) and trim."""
     if not value:
@@ -137,7 +152,7 @@ def parse_score(value: str | None) -> float | None:
     The sign is captured so a negative is rejected by the range check rather
     than silently becoming its absolute value.
     """
-    match = re.search(r"-?\d+(?:\.\d+)?", clean(value).replace(",", "."))
+    match = re.search(r"-?\d+(?:\.\d+)?", _bounded(value).replace(",", "."))
     if not match:
         return None
     score = float(match.group())
@@ -146,7 +161,7 @@ def parse_score(value: str | None) -> float | None:
 
 def parse_price(value: str | None) -> float | None:
     """Parse ``199:-``, ``1 250 kr``, ``159:50`` into SEK."""
-    text = clean(value)
+    text = _bounded(value)
     if not text:
         return None
     match = re.search(r"(\d[\d\s]*)(?:[,:](\d{1,2}))?", text)
@@ -161,7 +176,7 @@ def parse_price(value: str | None) -> float | None:
 
 def parse_volume_ml(value: str | None) -> int | None:
     """Parse ``75 cl`` / ``750 ml`` / ``1,5 l`` into millilitres."""
-    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(cl|ml|l)\b", clean(value).lower())
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(cl|ml|l)\b", _bounded(value).lower())
     if not match:
         return None
     amount = float(match.group(1).replace(",", "."))
@@ -172,7 +187,7 @@ def parse_volume_ml(value: str | None) -> int | None:
 
 def parse_alcohol(value: str | None) -> float | None:
     """Parse ``12% vol.`` / ``13,5 %`` into a percentage."""
-    match = re.search(r"(\d+(?:[.,]\d+)?)\s*%", clean(value))
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*%", _bounded(value))
     if not match:
         return None
     percent = float(match.group(1).replace(",", "."))
@@ -185,14 +200,16 @@ def split_vintage(full_name: str) -> tuple[str, int | None]:
     Only a trailing four-digit year in a plausible range counts, so names like
     ``Cuvée 21`` keep their number.
     """
-    text = clean(full_name)
-    match = re.fullmatch(r"(.*?)[\s,]+((?:19|20)\d{2})", text)
+    text = _bounded(full_name)
+    # Anchored at the end rather than a lazy prefix match: `(.*?)` scanned
+    # forward from every position, which is quadratic on a long name.
+    match = re.search(r"[\s,]+((?:19|20)\d{2})$", text)
     if not match:
         return text, None
-    vintage = int(match.group(2))
+    vintage = int(match.group(1))
     if not 1900 <= vintage <= datetime.now(UTC).year + 2:
         return text, None
-    name = clean(match.group(1))
+    name = clean(text[: match.start()])
     return (name, vintage) if name else (text, None)
 
 
