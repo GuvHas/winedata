@@ -17,13 +17,19 @@ import re
 import unicodedata
 from datetime import UTC, datetime
 from typing import Any, Final, TypedDict
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
 DEFAULT_BASE_URL: Final = "https://www.munskankarna.se"
 PRODUCT_URL_BASE: Final = "https://www.systembolaget.se/produkt/vin"
 SEARCH_URL_BASE: Final = "https://www.systembolaget.se/sortiment/"
+
+#: Schemes a scraped link may use. An allowlist, not a blocklist: `urljoin`
+#: passes `javascript:` and `data:` URLs through unchanged, and these URLs are
+#: rendered as clickable markdown links on a Lovelace card, so anything else
+#: would be an execution vector if the source site were ever compromised.
+_SAFE_URL_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
 
 #: Paths under /sv/vinlocus/ that are facets, not releases.
 _NON_RELEASE_SEGMENTS: Final[frozenset[str]] = frozenset(
@@ -394,6 +400,39 @@ def _text_of(node: Tag | None) -> str:
     return clean(node.get_text()) if node else ""
 
 
+def safe_url(href: str | None, base_url: str) -> str | None:
+    """Resolve a scraped href, or return None if it is not a safe link.
+
+    Rejects anything that is not http(s) after resolution, and anything that
+    resolves off the site being scraped. Control characters are stripped first,
+    because browsers ignore them inside a scheme: `java\tscript:` is a live
+    `javascript:` URL to a browser but not to a naive string comparison.
+    """
+    if not href:
+        return None
+
+    # Strip whitespace and C0/C1 control characters anywhere in the string.
+    cleaned = "".join(ch for ch in href if ch.isprintable() and not ch.isspace())
+    if not cleaned:
+        return None
+
+    try:
+        resolved = urljoin(base_url, cleaned)
+        parts = urlsplit(resolved)
+    except ValueError:
+        return None
+
+    if parts.scheme.lower() not in _SAFE_URL_SCHEMES:
+        return None
+
+    # Only links back to the site we are scraping are ours to publish.
+    base_host = urlsplit(base_url).hostname
+    if base_host and parts.hostname != base_host:
+        return None
+
+    return resolved
+
+
 def _parse_origin(card: Tag) -> tuple[str | None, str | None, str | None]:
     """Origin row: ``<a>Spanien</a>, <a>Navarra</a>, Cava``.
 
@@ -517,7 +556,7 @@ def _parse_wine_card(
         value_label=value_label,
         typical=card.select_one(".c-wine-info__typical") is not None,
         tasting_note=clean_or_none(_text_of(card.select_one(".c-wine-info__text"))),
-        review_url=urljoin(base_url, review_href) if review_href else None,
+        review_url=safe_url(review_href, base_url),
         article_number=article_number,
         product_url=build_product_url(article_number),
         release_id=release_id,
