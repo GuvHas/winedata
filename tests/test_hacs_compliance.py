@@ -309,3 +309,15 @@ def test_brand_assets_are_present_and_valid() -> None:
         assert (width, height) == (expected, expected), (
             f"{name} is {width}x{height}, expected {expected}x{expected}"
         )
+
+
+def test_manifest_keys_are_sorted_the_way_hassfest_requires() -> None:
+    """hassfest enforces: domain, name, then the rest alphabetically."""
+    import json as _json
+
+    keys = list(
+        _json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))
+    )
+    assert keys[:2] == ["domain", "name"], f"first two keys are {keys[:2]}"
+    rest = keys[2:]
+    assert rest == sorted(rest), f"keys after domain/name are not sorted: {rest}"

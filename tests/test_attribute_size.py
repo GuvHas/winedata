@@ -123,3 +123,26 @@ async def test_state_never_exceeds_the_255_character_limit(hass: HomeAssistant) 
     await _setup(hass, summary=HUGE_SUMMARY, wines=40, top_count=40)
     for entity_id in hass.states.async_entity_ids("sensor"):
         assert len(hass.states.get(entity_id).state) <= 255
+
+
+async def test_a_previously_saved_oversized_limit_is_clamped(hass: HomeAssistant) -> None:
+    """Upgrades keep their stored option; the new ceiling must still apply.
+
+    Lowering the schema bound only constrains newly submitted forms, so an
+    entry saved with the old maximum of 40 would keep recording 40 wines.
+    """
+    from custom_components.munskankarna.const import CONF_TOP_COUNT, MAX_TOP_COUNT
+    from custom_components.munskankarna.coordinator import MunskankarnaCoordinator
+
+    entry = create_entry(hass, options={CONF_TOP_COUNT: 40})
+    coordinator = MunskankarnaCoordinator(hass, entry)
+    assert coordinator.top_count == MAX_TOP_COUNT
+
+
+async def test_a_nonsense_saved_limit_falls_back(hass: HomeAssistant) -> None:
+    from custom_components.munskankarna.const import CONF_TOP_COUNT, DEFAULT_TOP_COUNT
+    from custom_components.munskankarna.coordinator import MunskankarnaCoordinator
+
+    for stored in (0, -5, "abc", None):
+        entry = create_entry(hass, options={CONF_TOP_COUNT: stored})
+        assert MunskankarnaCoordinator(hass, entry).top_count == DEFAULT_TOP_COUNT

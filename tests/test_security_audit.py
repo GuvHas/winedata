@@ -149,3 +149,86 @@ def test_tasting_note_and_producer_are_escaped_too() -> None:
     producer = wine_summary(_first_wine(html))["producer"]
     assert "|" not in producer or producer.count("\\|") == producer.count("|")
     assert "](" not in producer, f"link syntax survived in producer: {producer!r}"
+
+
+# ---------------------------------------------------------------------------
+# Follow-up findings from code review on PR #1.
+# ---------------------------------------------------------------------------
+
+
+def test_top_pick_state_is_sanitised() -> None:
+    """The top-pick sensor's *state* reaches a markdown heading.
+
+    Sanitising `wine_summary()` covered the attribute projection but not the
+    state itself, and the dashboard renders `## 🏆 {{ states(s) }}`.
+    """
+    from custom_components.munskankarna.sensor import GLOBAL_SENSORS
+
+    class _Coordinator:
+        top_count = 10
+
+        def all_wines(self):
+            return [
+                {
+                    "name": "Vin](javascript:alert(1))[x",
+                    "score": 17.0,
+                    "value_rating": "fynd",
+                    "price_sek": 199.0,
+                    "product_url": None,
+                    "review_url": None,
+                    "full_name": "x",
+                    "vintage": None,
+                    "producer": None,
+                    "band": None,
+                    "price_per_litre": None,
+                    "volume_ml": None,
+                    "color": "red",
+                    "country": None,
+                    "region": None,
+                    "grapes": [],
+                    "article_number": None,
+                }
+            ]
+
+    top_pick = next(d for d in GLOBAL_SENSORS if d.key == "top_pick")
+    state = top_pick.value_fn(_Coordinator())
+
+    heading = f"## 🏆 {state}"
+    assert "](" not in heading, f"link syntax survived into the heading: {heading!r}"
+    assert "|" not in str(state)
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        # Same host and https, but the path closes the markdown destination.
+        "/safe)[x](javascript:alert(1)",
+        "/a)b",
+        "/a(b",
+        "/a]b[c",
+        "/a b",
+    ],
+)
+def test_markdown_delimiters_in_a_url_cannot_escape_the_destination(href: str) -> None:
+    """A same-host URL still reaches a markdown link destination.
+
+    `[Wine](https://host/safe)[x](javascript:alert(1))` reintroduces the
+    clickable script link through the destination rather than the label.
+    """
+    wine = _first_wine(_card(href=href))
+    url = wine["review_url"]
+    if url is None:
+        return  # rejecting outright is also acceptable
+
+    link = f"[Wine]({url})"
+    assert link.count("](") == 1, f"destination escaped: {link}"
+    assert link.count(")") == 1, f"destination closed early: {link}"
+    for char in "()[] ":
+        assert char not in url, f"{char!r} survived unencoded in {url!r}"
+
+
+def test_ordinary_urls_are_not_mangled_by_the_encoding() -> None:
+    wine = _first_wine(_card(href="/sv/vinlocus/hitlista-3-september-2026/sileno-2025"))
+    assert wine["review_url"] == (
+        "https://www.munskankarna.se/sv/vinlocus/hitlista-3-september-2026/sileno-2025"
+    )

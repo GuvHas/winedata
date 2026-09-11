@@ -31,6 +31,23 @@ SEARCH_URL_BASE: Final = "https://www.systembolaget.se/sortiment/"
 #: would be an execution vector if the source site were ever compromised.
 _SAFE_URL_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
 
+#: Characters that are structural in a markdown link *destination*. Checking
+#: the scheme and host is not enough: a same-host path of `/safe)[x](javascript:
+#: alert(1)` closes the destination early, so `[Wine](…/safe)[x](javascript:…)`
+#: puts the script link back. Percent-encoding leaves the URL equivalent.
+_URL_MARKDOWN_ESCAPES: Final[dict[str, str]] = {
+    "(": "%28",
+    ")": "%29",
+    "[": "%5B",
+    "]": "%5D",
+    " ": "%20",
+    "<": "%3C",
+    ">": "%3E",
+    '"': "%22",
+    "'": "%27",
+    "`": "%60",
+}
+
 #: Paths under /sv/vinlocus/ that are facets, not releases.
 _NON_RELEASE_SEGMENTS: Final[frozenset[str]] = frozenset(
     {"land", "druva", "importor", "provningstyp", "producent", "argang", "sok"}
@@ -468,6 +485,8 @@ def safe_url(href: str | None, base_url: str) -> str | None:
     if base_host and parts.hostname != base_host:
         return None
 
+    for char, encoded in _URL_MARKDOWN_ESCAPES.items():
+        resolved = resolved.replace(char, encoded)
     return resolved
 
 

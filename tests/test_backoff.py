@@ -163,3 +163,31 @@ async def test_coordinator_abandons_the_cycle_when_rate_limited(hass) -> None:
         await coordinator._async_update_data()
 
     assert len(attempted) == 1, f"kept fetching after a 429: {attempted}"
+
+
+async def test_a_rate_limit_during_setup_is_shown_as_cannot_connect(hass) -> None:
+    """RateLimited must not fall through to the generic `unknown` error.
+
+    It is a sibling of CannotConnect, not a subclass, so the config flow's
+    `except CannotConnect` missed it: the user saw `unknown` and the log got a
+    traceback for an ordinary, expected condition.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from homeassistant import config_entries, data_entry_flow
+
+    from custom_components.munskankarna.const import CONF_BASE_URL, DEFAULT_BASE_URL, DOMAIN
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    with patch(
+        "custom_components.munskankarna.config_flow.async_validate_credentials",
+        new=AsyncMock(side_effect=RateLimited("slow down", retry_after=60)),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_BASE_URL: DEFAULT_BASE_URL}
+        )
+
+    assert result["type"] is data_entry_flow.FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_connect"}

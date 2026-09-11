@@ -136,7 +136,9 @@ GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
         translation_key="top_pick",
         name="Top pick",
         icon="mdi:trophy",
-        value_fn=lambda c: (wine["name"] if (wine := _top_pick(c)) else None),
+        # The state itself is rendered into a markdown heading by the shipped
+        # card, so it needs the same neutralisation as the attributes.
+        value_fn=lambda c: (markdown_safe(wine["name"]) if (wine := _top_pick(c)) else None),
         attributes_fn=lambda c: (
             wine_summary(wine) if (wine := _top_pick(c)) else {}
         ),

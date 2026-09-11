@@ -30,6 +30,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_TOP_COUNT,
     DOMAIN,
+    MAX_TOP_COUNT,
     VALUE_ORDER,
 )
 from .parser import ParseResult, ReleaseDict, WineDict
@@ -126,8 +127,19 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     @property
     def top_count(self) -> int:
-        """How many wines each sensor exposes in its attributes."""
-        return int(self.entry.options.get(CONF_TOP_COUNT) or DEFAULT_TOP_COUNT)
+        """How many wines each sensor exposes in its attributes.
+
+        Clamped rather than trusted: the options schema only constrains a form
+        being submitted, so an entry saved under an older, higher ceiling would
+        otherwise keep recording that many wines forever.
+        """
+        try:
+            value = int(self.entry.options.get(CONF_TOP_COUNT) or DEFAULT_TOP_COUNT)
+        except (TypeError, ValueError):
+            return DEFAULT_TOP_COUNT
+        if value < 1:
+            return DEFAULT_TOP_COUNT
+        return min(value, MAX_TOP_COUNT)
 
     def _client(self) -> MunskankarnaClient:
         """Build an API client for one update cycle.
