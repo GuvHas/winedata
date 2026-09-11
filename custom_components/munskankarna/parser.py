@@ -132,8 +132,12 @@ def clean_or_none(value: str | None) -> str | None:
 
 
 def parse_score(value: str | None) -> float | None:
-    """Parse a Swedish-formatted score: ``14,5`` -> 14.5. Only 0-20 is valid."""
-    match = re.search(r"\d+(?:\.\d+)?", clean(value).replace(",", "."))
+    """Parse a Swedish-formatted score: ``14,5`` -> 14.5. Only 0-20 is valid.
+
+    The sign is captured so a negative is rejected by the range check rather
+    than silently becoming its absolute value.
+    """
+    match = re.search(r"-?\d+(?:\.\d+)?", clean(value).replace(",", "."))
     if not match:
         return None
     score = float(match.group())
