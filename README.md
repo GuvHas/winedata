@@ -2,7 +2,7 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-41BDF5.svg)](https://www.home-assistant.io/)
-[![Version](https://img.shields.io/badge/version-1.0.2-blue.svg)](https://github.com/GuvHas/winedata/releases)
+[![Version](https://img.shields.io/badge/version-1.0.3-blue.svg)](https://github.com/GuvHas/winedata/releases)
 
 Weekly wine reviews from **Munskänkarna**, Sweden's wine society, matched to
 **Systembolaget's** catalog — on your dashboard, and available to automations.
@@ -324,7 +324,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 172 tests
+python -m pytest          # 271 tests
 ruff check custom_components tests
 ```
 
