@@ -102,9 +102,13 @@ number**, so they cannot be linked to a product page.
 > **Why "wines per sensor" is capped.** A Home Assistant sensor's state is
 > limited to 255 characters, so the wine list lives in attributes — and
 > attributes are written to the recorder and pushed to every client on each
-> update. The list is trimmed to display fields (tasting notes are omitted):
-> 10 wines is about 2.3 kB, versus roughly 49 kB for a full release.
-> If you raise the cap a lot, consider excluding the entity from the recorder.
+> update. The list is trimmed to display fields (tasting notes are omitted),
+> and each entry costs roughly 500 bytes: the default of 10 is about 6 kB per
+> update, and the ceiling of 25 about 13 kB. A full release would be ~49 kB.
+> The release `summary` is truncated to 280 characters for the same reason —
+> most tastings publish a sentence, but Webbviner publishes a ~1500-character
+> editorial listing into that field.
+> If you raise the cap, consider excluding the entity from the recorder.
 
 ## Entities
 

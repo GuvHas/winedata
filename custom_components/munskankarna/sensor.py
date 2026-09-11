@@ -27,6 +27,7 @@ from .const import (
     DOMAIN,
     KIND_LABELS,
     MANUFACTURER,
+    MAX_SUMMARY_LENGTH,
     VALUE_FYND,
 )
 from .coordinator import MunskankarnaCoordinator
@@ -63,6 +64,13 @@ def markdown_safe(value: str | None) -> str | None:
     if value is None:
         return None
     return " ".join(value.translate(_MARKDOWN_STRUCTURAL).split()) or None
+
+
+def truncate(value: str | None, limit: int) -> str | None:
+    """Shorten an over-long attribute, making the cut visible to the reader."""
+    if value is None or len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
 
 
 def wine_summary(wine: WineDict) -> dict[str, Any]:
@@ -280,7 +288,7 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
             "release_title": markdown_safe(release["title"]),
             "release_date": release["date"],
             "release_url": release["url"],
-            "summary": markdown_safe(release["summary"]),
+            "summary": truncate(markdown_safe(release["summary"]), MAX_SUMMARY_LENGTH),
             "wines": [
                 wine_summary(w) for w in self.coordinator.top_wines(self._kind)
             ],
