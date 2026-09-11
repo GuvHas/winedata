@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -13,6 +14,11 @@ try:  # Home Assistant >= 2024.4
     from homeassistant.config_entries import ConfigFlowResult
 except ImportError:  # pragma: no cover - older cores
     from homeassistant.data_entry_flow import FlowResult as ConfigFlowResult
+try:  # Home Assistant builds this context once, at startup, off the event loop.
+    from homeassistant.util.ssl import get_default_context
+except ImportError:  # pragma: no cover - very old cores
+    get_default_context = None  # type: ignore[assignment]
+
 from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
@@ -62,6 +68,18 @@ STEP_USER_SCHEMA = vol.Schema(
 )
 
 
+STEP_REAUTH_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_USERNAME): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.TEXT, autocomplete="username")
+        ),
+        vol.Required(CONF_PASSWORD): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD, autocomplete="current-password")
+        ),
+    }
+)
+
+
 def _kind_options() -> list[SelectOptionDict]:
     return [SelectOptionDict(value=kind, label=KIND_LABELS[kind]) for kind in ALL_KINDS]
 
@@ -89,7 +107,15 @@ class MunskankarnaConfigFlow(ConfigFlow, domain=DOMAIN):
             password = user_input.get(CONF_PASSWORD) or None
 
             try:
-                info = await async_validate_credentials(base_url, username, password)
+                # Hand over Home Assistant's cached SSL context: letting httpx
+                # build its own would read the CA bundle from disk on the event
+                # loop, which Home Assistant reports as a blocking call.
+                info = await async_validate_credentials(
+                    base_url,
+                    username,
+                    password,
+                    verify=get_default_context() if get_default_context is not None else None,
+                )
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
             except CannotConnect:
@@ -114,6 +140,53 @@ class MunskankarnaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_SCHEMA, errors=errors
+        )
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Start reauthentication after Munskänkarna rejected a stored login."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect fresh credentials for an existing entry."""
+        # `_get_reauth_entry()` only exists on newer cores; resolving through
+        # the flow context works across the whole supported range.
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:  # pragma: no cover - entry removed mid-flow
+            return self.async_abort(reason="reauth_failed")
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            base_url = entry.data.get(CONF_BASE_URL) or DEFAULT_BASE_URL
+            try:
+                await async_validate_credentials(
+                    base_url,
+                    user_input[CONF_USERNAME],
+                    user_input[CONF_PASSWORD],
+                    verify=get_default_context() if get_default_context is not None else None,
+                )
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001 - never leak a traceback into the UI
+                _LOGGER.exception("Unexpected error during Munskänkarna reauthentication")
+                errors["base"] = "unknown"
+            else:
+                # Merge rather than replace, so the base URL survives.
+                return self.async_update_reload_and_abort(
+                    entry, data={**entry.data, **user_input}
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=STEP_REAUTH_SCHEMA,
+            description_placeholders={"username": entry.data.get(CONF_USERNAME) or ""},
+            errors=errors,
         )
 
     @staticmethod

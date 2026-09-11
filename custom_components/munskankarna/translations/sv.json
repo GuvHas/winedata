@@ -9,6 +9,14 @@
           "username": "Användarnamn eller medlemsnummer",
           "password": "Lösenord"
         }
+      },
+      "reauth_confirm": {
+        "title": "Munskänkarna — logga in igen",
+        "description": "Munskänkarna nekade de sparade uppgifterna för {username}. Ange dem igen för att återansluta.",
+        "data": {
+          "username": "Användarnamn eller medlemsnummer",
+          "password": "Lösenord"
+        }
       }
     },
     "error": {
@@ -17,7 +25,9 @@
       "unknown": "Oväntat fel."
     },
     "abort": {
-      "already_configured": "Munskänkarna är redan konfigurerad."
+      "already_configured": "Munskänkarna är redan konfigurerad.",
+      "reauth_successful": "Munskänkarna autentiserades om.",
+      "reauth_failed": "Konfigurationsposten finns inte längre."
     }
   },
   "options": {

@@ -177,3 +177,166 @@ async def test_options_flow_updates_settings(hass: HomeAssistant) -> None:
     assert result["data"][CONF_SCAN_INTERVAL_HOURS] == 12
     assert result["data"][CONF_TOP_COUNT] == 5
     assert result["data"][CONF_KINDS] == [KIND_TILLFALLIGT]
+
+
+async def test_validation_supplies_an_ssl_context(hass: HomeAssistant, mock_setup_entry) -> None:
+    """Setup validation must not let httpx build an SSL context on the loop."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    validate = AsyncMock(return_value={"authenticated": False, "release_count": 34})
+    with patch(VALIDATE, new=validate):
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_BASE_URL: DEFAULT_BASE_URL}
+        )
+        await hass.async_block_till_done()
+
+    _, kwargs = validate.await_args
+    assert kwargs.get("verify") is not None, (
+        "the config flow did not pass an SSL context; httpx would build one "
+        "on the event loop and Home Assistant would flag a blocking call"
+    )
+
+
+async def test_config_flow_builds_no_ssl_context_on_the_loop(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """End to end: walking the flow must never call ssl.create_default_context here."""
+    import ssl as ssl_module
+    import threading
+
+    import httpx
+    import respx
+
+    from custom_components.munskankarna import api as api_module
+
+    monkeypatch.setattr(api_module, "_DEFAULT_SSL_CONTEXT", None, raising=False)
+    loop_thread = threading.current_thread()
+    offenders: list[str] = []
+    real = ssl_module.create_default_context
+
+    def recording(*args, **kwargs):
+        if threading.current_thread() is loop_thread:
+            offenders.append("create_default_context on the event loop")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ssl_module, "create_default_context", recording)
+
+    index_html = (
+        "<html><h3>Hitlista</h3>"
+        '<a href="/sv/vinlocus/hitlista-3-september-2026">Hitlista 3 september 2026</a></html>'
+    )
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(f"{DEFAULT_BASE_URL}/sv/vinlocus/provningstyp").mock(
+            return_value=httpx.Response(200, text=index_html)
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_BASE_URL: DEFAULT_BASE_URL}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is data_entry_flow.FlowResultType.CREATE_ENTRY
+    assert offenders == [], offenders
+
+
+# ---------------------------------------------------------------------------
+# Reauthentication
+#
+# The coordinator raises ConfigEntryAuthFailed when a login is rejected, which
+# makes Home Assistant start a reauth flow. Without these steps that flow dies
+# with "Handler doesn't support step reauth" and the user gets no way to fix
+# their password.
+# ---------------------------------------------------------------------------
+
+
+async def test_rejected_login_starts_a_reauth_form(hass: HomeAssistant) -> None:
+    from custom_components.munskankarna.api import InvalidAuth, MunskankarnaClient
+    from custom_components.munskankarna.const import CONF_KINDS, KIND_TILLFALLIGT
+    from tests.helpers import create_entry
+
+    entry = create_entry(
+        hass,
+        data={
+            CONF_BASE_URL: DEFAULT_BASE_URL,
+            CONF_USERNAME: "member",
+            CONF_PASSWORD: "stale",
+        },
+        options={CONF_KINDS: [KIND_TILLFALLIGT]},
+    )
+    with patch.object(
+        MunskankarnaClient, "async_login", new=AsyncMock(side_effect=InvalidAuth)
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    flows = [
+        flow
+        for flow in hass.config_entries.flow.async_progress()
+        if flow["handler"] == DOMAIN and flow["context"]["source"] == "reauth"
+    ]
+    assert flows, "a rejected login should start a reauth flow"
+    assert flows[0]["step_id"] == "reauth_confirm"
+
+
+async def test_reauth_accepts_corrected_credentials(hass: HomeAssistant) -> None:
+    from tests.helpers import create_entry
+
+    entry = create_entry(
+        hass,
+        data={
+            CONF_BASE_URL: DEFAULT_BASE_URL,
+            CONF_USERNAME: "member",
+            CONF_PASSWORD: "stale",
+        },
+    )
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reauth", "entry_id": entry.entry_id},
+        data=dict(entry.data),
+    )
+    assert result["type"] is data_entry_flow.FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+
+    with (
+        patch(VALIDATE, new=AsyncMock(return_value={"authenticated": True, "release_count": 34})),
+        patch("custom_components.munskankarna.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_USERNAME: "member", CONF_PASSWORD: "fresh"}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is data_entry_flow.FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_PASSWORD] == "fresh"
+    # The base URL must survive a reauth that only changes credentials.
+    assert entry.data[CONF_BASE_URL] == DEFAULT_BASE_URL
+
+
+async def test_reauth_rejects_still_bad_credentials(hass: HomeAssistant) -> None:
+    from tests.helpers import create_entry
+
+    entry = create_entry(
+        hass,
+        data={
+            CONF_BASE_URL: DEFAULT_BASE_URL,
+            CONF_USERNAME: "member",
+            CONF_PASSWORD: "stale",
+        },
+    )
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reauth", "entry_id": entry.entry_id},
+        data=dict(entry.data),
+    )
+    with patch(VALIDATE, new=AsyncMock(side_effect=InvalidAuth)):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_USERNAME: "member", CONF_PASSWORD: "also-wrong"}
+        )
+
+    assert result["type"] is data_entry_flow.FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_auth"}
+    assert entry.data[CONF_PASSWORD] == "stale"

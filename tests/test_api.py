@@ -199,3 +199,117 @@ async def test_fetch_release_returns_parsed_wines(
         result = await client.async_fetch_release(release_id, "Hitlista 3 september 2026")
     assert len(result["wines"]) == 5
     assert all(w["article_number"] for w in result["wines"])
+
+
+# ---------------------------------------------------------------------------
+# Event-loop safety
+#
+# httpx.AsyncClient() with no `verify` argument calls ssl.create_default_context(),
+# which reads certifi's CA bundle from disk. Doing that on the event loop trips
+# Home Assistant's blocking-call detector:
+#
+#   Detected blocking call to load_verify_locations ... inside the event loop
+#
+# These tests pin the two ways the client avoids it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ssl_probe(monkeypatch):
+    """Record every ssl.create_default_context call and the thread it ran on."""
+    import ssl as ssl_module
+    import threading
+
+    from custom_components.munskankarna import api as api_module
+
+    # Drop any context cached by an earlier test so the build path is exercised.
+    monkeypatch.setattr(api_module, "_DEFAULT_SSL_CONTEXT", None, raising=False)
+
+    calls: list[threading.Thread] = []
+    real = ssl_module.create_default_context
+
+    def recording(*args, **kwargs):
+        calls.append(threading.current_thread())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ssl_module, "create_default_context", recording)
+    return calls
+
+
+@respx.mock
+async def test_ssl_context_is_never_built_on_the_event_loop(ssl_probe) -> None:
+    """With no context supplied, the build must happen off the loop thread."""
+    import threading
+
+    loop_thread = threading.current_thread()
+
+    respx.get(f"{DEFAULT_BASE_URL}/x").mock(return_value=httpx.Response(200, text="ok"))
+    async with MunskankarnaClient(DEFAULT_BASE_URL) as client:
+        await client.fetch_text("/x")
+
+    assert ssl_probe, "expected the client to build a default SSL context"
+    for thread in ssl_probe:
+        assert thread is not loop_thread, (
+            "ssl.create_default_context ran on the event loop thread; "
+            "Home Assistant would flag this as a blocking call"
+        )
+
+
+@respx.mock
+async def test_supplied_ssl_context_is_used_without_building_one(ssl_probe) -> None:
+    """Passing Home Assistant's cached context must skip the build entirely."""
+    import ssl as ssl_module
+
+    context = ssl_module.create_default_context()
+    ssl_probe.clear()  # ignore the context we just built for the test itself
+
+    respx.get(f"{DEFAULT_BASE_URL}/x").mock(return_value=httpx.Response(200, text="ok"))
+    async with MunskankarnaClient(DEFAULT_BASE_URL, verify=context) as client:
+        await client.fetch_text("/x")
+
+    assert ssl_probe == [], "a context was supplied, so none should have been built"
+
+
+async def test_default_ssl_context_is_cached_across_clients(ssl_probe) -> None:
+    """Building it once per integration, not once per request."""
+    from custom_components.munskankarna.api import async_default_ssl_context
+
+    first = await async_default_ssl_context()
+    second = await async_default_ssl_context()
+
+    assert first is second
+    assert len(ssl_probe) == 1, f"built the context {len(ssl_probe)} times"
+
+
+# ---------------------------------------------------------------------------
+# Client lifecycle
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_an_injected_client_is_not_closed_by_us() -> None:
+    """Home Assistant owns any client it hands us; closing it would break others."""
+    injected = httpx.AsyncClient()
+    respx.get(f"{DEFAULT_BASE_URL}/x").mock(return_value=httpx.Response(200, text="ok"))
+
+    async with MunskankarnaClient(DEFAULT_BASE_URL, client=injected) as client:
+        await client.fetch_text("/x")
+
+    assert not injected.is_closed, "the injected client must stay open"
+    await injected.aclose()
+
+
+@respx.mock
+async def test_login_is_idempotent() -> None:
+    """A session is established once, not re-posted for every fetch."""
+    respx.get(DEFAULT_BASE_URL + "/").mock(return_value=httpx.Response(200, text=LOGIN_PAGE))
+    login = respx.post(DEFAULT_BASE_URL + "/").mock(
+        return_value=httpx.Response(200, text=LOGGED_IN_PAGE)
+    )
+
+    async with MunskankarnaClient(DEFAULT_BASE_URL, username="u", password="p") as client:
+        assert await client.async_login() is True
+        assert await client.async_login() is True
+        assert await client.async_login() is True
+
+    assert login.call_count == 1, f"logged in {login.call_count} times"

@@ -9,6 +9,14 @@
           "username": "Username or member number",
           "password": "Password"
         }
+      },
+      "reauth_confirm": {
+        "title": "Munskänkarna — sign in again",
+        "description": "Munskänkarna rejected the stored credentials for {username}. Enter them again to reconnect.",
+        "data": {
+          "username": "Username or member number",
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -17,7 +25,9 @@
       "unknown": "Unexpected error."
     },
     "abort": {
-      "already_configured": "Munskänkarna is already configured."
+      "already_configured": "Munskänkarna is already configured.",
+      "reauth_successful": "Munskänkarna was reauthenticated successfully.",
+      "reauth_failed": "The configuration entry no longer exists."
     }
   },
   "options": {

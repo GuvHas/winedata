@@ -1,12 +1,18 @@
 {
   "domain": "munskankarna",
   "name": "Munskänkarna",
-  "codeowners": ["@GuvHas"],
+  "codeowners": [
+    "@GuvHas"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/GuvHas/winedata/blob/main/custom_components/munskankarna/README.md",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/GuvHas/winedata/issues",
-  "requirements": ["httpx>=0.27.0", "beautifulsoup4>=4.12.0", "lxml>=5.0.0"],
-  "version": "1.0.0"
+  "requirements": [
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0"
+  ],
+  "version": "1.0.1"
 }

@@ -16,7 +16,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import MunskankarnaClient, MunskankarnaError
+try:  # Home Assistant builds this context once, at startup, off the event loop.
+    from homeassistant.util.ssl import get_default_context
+except ImportError:  # pragma: no cover - very old cores
+    get_default_context = None  # type: ignore[assignment]
+
+from homeassistant.exceptions import ConfigEntryAuthFailed
+
+from .api import InvalidAuth, MunskankarnaClient, MunskankarnaError
 from .const import (
     CONF_BASE_URL,
     CONF_KINDS,
@@ -111,6 +118,8 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialise with the interval configured in the options flow."""
         self.entry = entry
+        #: The client for the in-flight update cycle, if any.
+        self._api: MunskankarnaClient | None = None
         hours = entry.options.get(CONF_SCAN_INTERVAL_HOURS)
         interval = timedelta(hours=hours) if hours else DEFAULT_SCAN_INTERVAL
 
@@ -138,30 +147,62 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return int(self.entry.options.get(CONF_TOP_COUNT) or DEFAULT_TOP_COUNT)
 
     def _client(self) -> MunskankarnaClient:
+        """Build an API client for one update cycle.
+
+        Home Assistant's cached SSL context is passed in rather than letting
+        httpx create one: building a context reads the CA bundle from disk,
+        which is a blocking call the event loop would flag.
+        """
         return MunskankarnaClient(
             self.base_url,
             self.entry.data.get(CONF_USERNAME),
             self.entry.data.get(CONF_PASSWORD),
+            verify=get_default_context() if get_default_context is not None else None,
         )
 
+    def _active_client(self) -> MunskankarnaClient:
+        """The client for the update cycle currently in flight."""
+        if self._api is None:
+            raise RuntimeError("No active client; call inside _async_update_data")
+        return self._api
+
     # -- fetch seams (patched in tests) ------------------------------------
+    #
+    # These reuse the cycle's single client rather than opening their own, so
+    # one poll means one client, one SSL setup and one login regardless of how
+    # many releases are fetched.
 
     async def _async_fetch_index(self) -> list[ReleaseDict]:
         """Fetch the release index."""
-        async with self._client() as client:
-            await client.async_login()
-            return await client.async_fetch_releases()
+        return await self._active_client().async_fetch_releases()
 
     async def _async_fetch_release(self, release_id: str, title: str) -> ParseResult:
         """Fetch one release page."""
-        async with self._client() as client:
-            await client.async_login()
-            return await client.async_fetch_release(release_id, title)
+        return await self._active_client().async_fetch_release(release_id, title)
 
     # -- update ------------------------------------------------------------
 
     async def _async_update_data(self) -> CoordinatorData:
-        """Fetch the current release for each configured tasting type."""
+        """Fetch the current release for each configured tasting type.
+
+        One client and one login serve the whole cycle.
+        """
+        async with self._client() as client:
+            self._api = client
+            try:
+                # A rejected login is fatal for the cycle; anonymous access
+                # returns False here and simply carries on.
+                await client.async_login()
+                return await self._async_collect()
+            except InvalidAuth as err:
+                raise ConfigEntryAuthFailed(
+                    "Munskänkarna rejected the configured credentials"
+                ) from err
+            finally:
+                self._api = None
+
+    async def _async_collect(self) -> CoordinatorData:
+        """Fetch the index and every configured release using the active client."""
         try:
             index = await self._async_fetch_index()
         except MunskankarnaError as err:

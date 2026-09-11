@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from homeassistant.core import HomeAssistant
 
+from custom_components.munskankarna.api import MunskankarnaClient
 from custom_components.munskankarna.const import (
     CONF_BASE_URL,
     CONF_KINDS,
@@ -49,6 +50,9 @@ async def test_diagnostics_redacts_credentials(hass: HomeAssistant) -> None:
             new=AsyncMock(return_value=[build_release(RELEASE_ID, KIND_TILLFALLIGT, "2026-09-11")]),
         ),
         patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
+        # Credentials are configured here, so the cycle's single login would
+        # otherwise reach the network.
+        patch.object(MunskankarnaClient, "async_login", new=AsyncMock(return_value=True)),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()

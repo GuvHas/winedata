@@ -245,3 +245,95 @@ def test_coordinator_init_kwargs_adapts_to_the_running_core(hass: HomeAssistant)
     signature = inspect.signature(DataUpdateCoordinator.__init__)
     for key in kwargs:
         assert key in signature.parameters
+
+
+# ---------------------------------------------------------------------------
+# Client lifecycle across an update cycle
+#
+# The first implementation built a fresh httpx client — and re-posted the login
+# — for the index and for every release. With four tracked tastings that was
+# five clients and five logins per poll, each one rebuilding an SSL context.
+# ---------------------------------------------------------------------------
+
+
+async def test_update_cycle_uses_one_client_and_one_login(hass: HomeAssistant) -> None:
+    """One client, one login, however many releases are fetched."""
+    import httpx
+    import respx
+
+    from custom_components.munskankarna.const import (
+        CONF_BASE_URL,
+        CONF_PASSWORD,
+        CONF_USERNAME,
+        DEFAULT_BASE_URL,
+    )
+
+    login_page = (
+        '<html><form class="js-login">'
+        '<input name="__RequestVerificationToken" value="T"/>'
+        '<input name="ufprt" value="U"/>'
+        '<input name="Password" type="password"/></form></html>'
+    )
+    logged_in = '<html><a class="js-logout">Logga ut</a></html>'
+    index_html = (
+        "<html><h3>Tillfälligt sortiment</h3>"
+        '<a href="/sv/vinlocus/tillfalligt-sortiment-11-september-2026">'
+        "Tillfälligt sortiment 11 september 2026</a>"
+        "<h3>Hitlista</h3>"
+        '<a href="/sv/vinlocus/hitlista-3-september-2026">Hitlista 3 september 2026</a>'
+        "</html>"
+    )
+    release_html = (
+        '<ul id="wine-bottles-list"><li class="medium-3 groupedlist">'
+        '<div class="c-wine-info"><div class="wine-points">15</div>'
+        '<div class="c-wine-info__price">199:-</div>'
+        '<div class="c-wine-info__headings"><h3><a href="/sv/vinlocus/a/b">'
+        "<span>Ett Vin 2020</span></a></h3></div></div></li></ul>"
+    )
+
+    entry = create_entry(
+        hass,
+        data={
+            CONF_BASE_URL: DEFAULT_BASE_URL,
+            CONF_USERNAME: "member",
+            CONF_PASSWORD: "secret",
+        },
+        options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN]},
+    )
+    coordinator = MunskankarnaCoordinator(hass, entry)
+
+    clients: list[object] = []
+    original = MunskankarnaCoordinator._client
+
+    def counting_client(self):
+        built = original(self)
+        clients.append(built)
+        return built
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(DEFAULT_BASE_URL + "/").mock(return_value=httpx.Response(200, text=login_page))
+        login = mock.post(DEFAULT_BASE_URL + "/").mock(
+            return_value=httpx.Response(200, text=logged_in)
+        )
+        mock.get(f"{DEFAULT_BASE_URL}/sv/vinlocus/provningstyp").mock(
+            return_value=httpx.Response(200, text=index_html)
+        )
+        mock.route(url__regex=r".*/sv/vinlocus/(tillfalligt|hitlista).*").mock(
+            return_value=httpx.Response(200, text=release_html)
+        )
+
+        with patch.object(MunskankarnaCoordinator, "_client", counting_client):
+            data = await coordinator._async_update_data()
+
+    assert set(data["releases"]) == {KIND_TILLFALLIGT, KIND_HITLISTAN}
+    assert len(clients) == 1, f"built {len(clients)} clients in one update cycle"
+    assert login.call_count == 1, f"logged in {login.call_count} times in one update cycle"
+
+
+async def test_client_is_built_with_an_ssl_context(hass: HomeAssistant) -> None:
+    """The coordinator must hand the API an SSL context, never let httpx build one."""
+    entry = create_entry(hass)
+    coordinator = MunskankarnaCoordinator(hass, entry)
+    client = coordinator._client()
+    # Private attribute by necessity: this is exactly the contract under test.
+    assert client._verify is not None, "coordinator did not supply an SSL context"

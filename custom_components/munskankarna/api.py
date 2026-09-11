@@ -3,6 +3,22 @@
 Strictly `httpx.AsyncClient` — no blocking I/O, so this is safe to await
 directly from Home Assistant's event loop with no executor hop.
 
+SSL contexts
+------------
+`httpx.AsyncClient()` with no `verify` argument calls
+`ssl.create_default_context()`, which reads certifi's CA bundle from disk.
+On the event loop that trips Home Assistant's blocking-call detector:
+
+    Detected blocking call to load_verify_locations ... inside the event loop
+
+So a context is never built implicitly here. Callers inside Home Assistant pass
+`verify=homeassistant.util.ssl.get_default_context()`, which HA has already
+built off-loop. Standalone callers (tests, CLI use) get a context built in a
+worker thread via `async_default_ssl_context()` and cached for the process.
+
+This module deliberately imports nothing from Home Assistant, so it can be
+exercised on Python versions the HA test harness does not yet support.
+
 Authentication notes
 --------------------
 The Vinlocus review pages this integration reads are **public**, so credentials
@@ -21,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 from types import TracebackType
 from typing import Any, Final, Self
 
@@ -51,6 +68,24 @@ _AUTH_COOKIE_HINTS: Final[tuple[str, ...]] = ("identity", "aspxauth", "umb_", "m
 #: Politeness delay between consecutive requests, in seconds.
 _REQUEST_SPACING: Final = 0.75
 
+#: Process-wide cache for the fallback SSL context. Building one reads the CA
+#: bundle from disk, so it is done once, in a worker thread. A benign race here
+#: would only build it twice and keep one; a lock bound to a particular event
+#: loop would be worse.
+_DEFAULT_SSL_CONTEXT: ssl.SSLContext | None = None
+
+
+async def async_default_ssl_context() -> ssl.SSLContext:
+    """Return a default SSL context, built off the event loop and cached.
+
+    Only used when the caller supplies no context of its own. Inside Home
+    Assistant, prefer passing `homeassistant.util.ssl.get_default_context()`.
+    """
+    global _DEFAULT_SSL_CONTEXT  # noqa: PLW0603
+    if _DEFAULT_SSL_CONTEXT is None:
+        _DEFAULT_SSL_CONTEXT = await asyncio.to_thread(ssl.create_default_context)
+    return _DEFAULT_SSL_CONTEXT
+
 
 class MunskankarnaError(Exception):
     """Base error for this integration."""
@@ -73,13 +108,24 @@ class MunskankarnaClient:
         username: str | None = None,
         password: str | None = None,
         client: httpx.AsyncClient | None = None,
+        verify: ssl.SSLContext | bool | None = None,
     ) -> None:
-        """Store configuration. The HTTP client is created lazily on entry."""
+        """Store configuration. The HTTP client is created lazily on entry.
+
+        `client` — an externally owned client to use as-is. It is never closed
+        by this class, since Home Assistant manages the lifetime of the ones it
+        hands out.
+
+        `verify` — an SSL context (or bool) for a client created here. Pass
+        Home Assistant's cached context to avoid building one at all; leave it
+        as None and one is built off the loop and reused.
+        """
         self._base_url = base_url.rstrip("/")
         self._username = username or None
         self._password = password or None
         self._client = client
         self._owns_client = client is None
+        self._verify = verify
         self._authenticated = False
         self._last_request = 0.0
 
@@ -87,7 +133,13 @@ class MunskankarnaClient:
 
     async def __aenter__(self) -> Self:
         if self._client is None:
+            # Resolve the context before constructing the client: letting httpx
+            # default it would read the CA bundle from disk on this thread.
+            verify = self._verify if self._verify is not None else (
+                await async_default_ssl_context()
+            )
             self._client = httpx.AsyncClient(
+                verify=verify,
                 timeout=DEFAULT_TIMEOUT,
                 follow_redirects=True,
                 headers={
@@ -158,6 +210,10 @@ class MunskankarnaClient:
         """
         if not self.has_credentials:
             return False
+        if self._authenticated:
+            # The session cookie is already on the jar; re-posting credentials
+            # on every fetch would be wasteful and rude to the login endpoint.
+            return True
         if self._client is None:
             raise RuntimeError("MunskankarnaClient must be used as an async context manager")
 
@@ -269,13 +325,20 @@ class MunskankarnaClient:
 
 
 async def async_validate_credentials(
-    base_url: str, username: str | None, password: str | None
+    base_url: str,
+    username: str | None,
+    password: str | None,
+    verify: ssl.SSLContext | bool | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Validate a config-flow submission.
 
+    `verify`/`client` let the caller supply Home Assistant's SSL context or a
+    ready-made client, so no context is built on the event loop.
+
     Raises `InvalidAuth` or `CannotConnect`; returns a small summary on success.
     """
-    async with MunskankarnaClient(base_url, username, password) as client:
+    async with MunskankarnaClient(base_url, username, password, client, verify) as client:
         await client.async_validate_connection()
         releases = await client.async_fetch_releases()
         return {

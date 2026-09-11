@@ -136,6 +136,43 @@ recorder:
       - sensor.munskankarna_tillfalligt_sortiment
 ```
 
+## Event-loop safety
+
+Home Assistant flags any blocking I/O performed on the event loop. Creating an
+`httpx.AsyncClient()` without a `verify` argument is one such case — httpx then
+calls `ssl.create_default_context()`, which reads certifi's CA bundle from disk:
+
+```
+Detected blocking call to load_verify_locations with args
+(<ssl.SSLContext ...>, '.../certifi/cacert.pem', None, None) inside the event loop
+```
+
+This integration never lets that happen:
+
+- Inside Home Assistant, the config flow and coordinator pass
+  `homeassistant.util.ssl.get_default_context()` — a context HA has already
+  built off-loop at startup — so none is created here at all.
+- Standalone (tests, CLI use), `api.py` builds one in a worker thread via
+  `asyncio.to_thread` and caches it for the process.
+
+One client, with one login, serves an entire update cycle regardless of how
+many tastings are tracked. An earlier version opened a fresh client and
+re-posted the login for the index *and* every release — five of each per poll
+on a default configuration.
+
+`tests/test_event_loop_safety.py` guards this by installing the same probe Home
+Assistant uses (patching `ssl.SSLContext.load_verify_locations`) and driving the
+config flow, entry setup and a full update cycle through it. It includes a test
+asserting the probe still catches a deliberately unguarded client, so it cannot
+silently stop testing anything.
+
+## Reauthentication
+
+If Munskänkarna rejects stored credentials, the coordinator raises
+`ConfigEntryAuthFailed` and Home Assistant opens a reauth dialog asking for the
+password again. The base URL and options are preserved; only the credentials
+are replaced.
+
 ## Services
 
 ### `munskankarna.trigger_sync`
@@ -195,6 +232,9 @@ treated as a failure, because every sensor would otherwise be silently empty.
 others are unaffected. Check `sensor.munskankarna_wines_tested`'s `warnings`
 attribute, or download diagnostics from the integration page (credentials are
 redacted).
+
+**"Detected blocking call to load_verify_locations"** — fixed in 1.0.1. Update
+the integration; see [Event-loop safety](#event-loop-safety).
 
 ## Attribution
 
