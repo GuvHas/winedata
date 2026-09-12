@@ -13,6 +13,11 @@ scale and flags price/quality as *Fynd* → *Mer än prisvärt* → *Prisvärt* 
 and exposes every wine with its **article number and a direct product link**, so
 a bargain is one tap from the Systembolaget page.
 
+> [!NOTE]
+> An unofficial, community-built integration. Not affiliated with, endorsed by
+> or supported by Munskänkarna or Systembolaget — please send questions here,
+> not to them.
+
 ---
 
 ## Contents
@@ -408,3 +413,25 @@ fails for an unrelated reason; it is idempotent, as is the whole workflow.
 > Forgetting the version bump is the one way to ship nothing: the code reaches
 > `main` but HACS keeps offering the previous version, since there is no new
 > Release to offer. The notice in the workflow log is there to catch it.
+
+## Attribution
+
+The reviews, scores and value verdicts this integration surfaces are the work of
+**[Munskänkarna](https://www.munskankarna.se)**, Sweden's wine society, and
+remain theirs. Article numbers and product pages belong to
+**[Systembolaget](https://www.systembolaget.se)**.
+
+This project is built and maintained by [@GuvHas](https://github.com/GuvHas) as
+an independent, unofficial integration. It is **not affiliated with, endorsed by
+or supported by Munskänkarna or Systembolaget**, and neither organisation is
+responsible for it or for anything it displays. Bugs, questions and feature
+requests belong in this repository's
+[issue tracker](https://github.com/GuvHas/winedata/issues) — please do not take
+them to Munskänkarna or Systembolaget.
+
+It reads Munskänkarna's **public** review pages; credentials are optional and
+only needed for member-only content. Requests identify themselves honestly
+rather than impersonating a browser, are spaced out, are limited to one poll
+every few hours by default, and stop entirely when the site asks them to. If you
+value the reviews, [support Munskänkarna](https://www.munskankarna.se) by
+becoming a member.
