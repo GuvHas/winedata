@@ -17,13 +17,36 @@ import re
 import unicodedata
 from datetime import UTC, datetime
 from typing import Any, Final, TypedDict
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
 DEFAULT_BASE_URL: Final = "https://www.munskankarna.se"
 PRODUCT_URL_BASE: Final = "https://www.systembolaget.se/produkt/vin"
 SEARCH_URL_BASE: Final = "https://www.systembolaget.se/sortiment/"
+
+#: Schemes a scraped link may use. An allowlist, not a blocklist: `urljoin`
+#: passes `javascript:` and `data:` URLs through unchanged, and these URLs are
+#: rendered as clickable markdown links on a Lovelace card, so anything else
+#: would be an execution vector if the source site were ever compromised.
+_SAFE_URL_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
+
+#: Characters that are structural in a markdown link *destination*. Checking
+#: the scheme and host is not enough: a same-host path of `/safe)[x](javascript:
+#: alert(1)` closes the destination early, so `[Wine](…/safe)[x](javascript:…)`
+#: puts the script link back. Percent-encoding leaves the URL equivalent.
+_URL_MARKDOWN_ESCAPES: Final[dict[str, str]] = {
+    "(": "%28",
+    ")": "%29",
+    "[": "%5B",
+    "]": "%5D",
+    " ": "%20",
+    "<": "%3C",
+    ">": "%3E",
+    '"': "%22",
+    "'": "%27",
+    "`": "%60",
+}
 
 #: Paths under /sv/vinlocus/ that are facets, not releases.
 _NON_RELEASE_SEGMENTS: Final[frozenset[str]] = frozenset(
@@ -108,6 +131,21 @@ class ParseResult(TypedDict):
 # ---------------------------------------------------------------------------
 
 
+#: Upper bound on text handed to the small field parsers. A score, price,
+#: volume or alcohol reading is a handful of characters; a name is short. The
+#: parsers use patterns whose cost grows quadratically with the length of a
+#: digit run, and Python refuses to convert integers beyond 4300 digits at all,
+#: so scraped text is truncated before it reaches them. Measured before this
+#: bound: ~10s of event-loop stall on a 40k input, and a ValueError from
+#: int() on a 5000-digit run.
+_MAX_FIELD_CHARS: Final = 200
+
+
+def _bounded(value: str | None) -> str:
+    """Clean a scraped value and cap its length for the field parsers."""
+    return clean(value)[:_MAX_FIELD_CHARS]
+
+
 def clean(value: str | None) -> str:
     """Collapse whitespace (including non-breaking spaces) and trim."""
     if not value:
@@ -126,8 +164,12 @@ def clean_or_none(value: str | None) -> str | None:
 
 
 def parse_score(value: str | None) -> float | None:
-    """Parse a Swedish-formatted score: ``14,5`` -> 14.5. Only 0-20 is valid."""
-    match = re.search(r"\d+(?:\.\d+)?", clean(value).replace(",", "."))
+    """Parse a Swedish-formatted score: ``14,5`` -> 14.5. Only 0-20 is valid.
+
+    The sign is captured so a negative is rejected by the range check rather
+    than silently becoming its absolute value.
+    """
+    match = re.search(r"-?\d+(?:\.\d+)?", _bounded(value).replace(",", "."))
     if not match:
         return None
     score = float(match.group())
@@ -136,7 +178,7 @@ def parse_score(value: str | None) -> float | None:
 
 def parse_price(value: str | None) -> float | None:
     """Parse ``199:-``, ``1 250 kr``, ``159:50`` into SEK."""
-    text = clean(value)
+    text = _bounded(value)
     if not text:
         return None
     match = re.search(r"(\d[\d\s]*)(?:[,:](\d{1,2}))?", text)
@@ -151,7 +193,7 @@ def parse_price(value: str | None) -> float | None:
 
 def parse_volume_ml(value: str | None) -> int | None:
     """Parse ``75 cl`` / ``750 ml`` / ``1,5 l`` into millilitres."""
-    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(cl|ml|l)\b", clean(value).lower())
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(cl|ml|l)\b", _bounded(value).lower())
     if not match:
         return None
     amount = float(match.group(1).replace(",", "."))
@@ -162,7 +204,7 @@ def parse_volume_ml(value: str | None) -> int | None:
 
 def parse_alcohol(value: str | None) -> float | None:
     """Parse ``12% vol.`` / ``13,5 %`` into a percentage."""
-    match = re.search(r"(\d+(?:[.,]\d+)?)\s*%", clean(value))
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*%", _bounded(value))
     if not match:
         return None
     percent = float(match.group(1).replace(",", "."))
@@ -175,14 +217,16 @@ def split_vintage(full_name: str) -> tuple[str, int | None]:
     Only a trailing four-digit year in a plausible range counts, so names like
     ``Cuvée 21`` keep their number.
     """
-    text = clean(full_name)
-    match = re.fullmatch(r"(.*?)[\s,]+((?:19|20)\d{2})", text)
+    text = _bounded(full_name)
+    # Anchored at the end rather than a lazy prefix match: `(.*?)` scanned
+    # forward from every position, which is quadratic on a long name.
+    match = re.search(r"[\s,]+((?:19|20)\d{2})$", text)
     if not match:
         return text, None
-    vintage = int(match.group(2))
+    vintage = int(match.group(1))
     if not 1900 <= vintage <= datetime.now(UTC).year + 2:
         return text, None
-    name = clean(match.group(1))
+    name = clean(text[: match.start()])
     return (name, vintage) if name else (text, None)
 
 
@@ -291,8 +335,25 @@ def slugify(value: str) -> str:
 
 
 def normalize_article_number(value: str | None) -> str | None:
-    """Article numbers are digits only; reject anything implausible."""
-    digits = re.sub(r"\D", "", clean(value))
+    """Extract a Systembolaget article number, or None if there is not one.
+
+    Takes the first run of digits rather than stripping every non-digit: the
+    old behaviour welded package suffixes onto the number, turning
+    "9049001 (2-pack)" into "90490012" — a valid-looking number pointing at an
+    unrelated product. A wrong link is worse than no link.
+
+    Leading zeros are dropped because Systembolaget's URLs carry none, and an
+    all-zero or too-short run is rejected outright.
+    """
+    text = clean(value)
+    if not text:
+        return None
+
+    match = re.search(r"\d+", text)
+    if match is None:
+        return None
+
+    digits = match.group().lstrip("0")
     return digits if 3 <= len(digits) <= 10 else None
 
 
@@ -394,6 +455,41 @@ def _text_of(node: Tag | None) -> str:
     return clean(node.get_text()) if node else ""
 
 
+def safe_url(href: str | None, base_url: str) -> str | None:
+    """Resolve a scraped href, or return None if it is not a safe link.
+
+    Rejects anything that is not http(s) after resolution, and anything that
+    resolves off the site being scraped. Control characters are stripped first,
+    because browsers ignore them inside a scheme: `java\tscript:` is a live
+    `javascript:` URL to a browser but not to a naive string comparison.
+    """
+    if not href:
+        return None
+
+    # Strip whitespace and C0/C1 control characters anywhere in the string.
+    cleaned = "".join(ch for ch in href if ch.isprintable() and not ch.isspace())
+    if not cleaned:
+        return None
+
+    try:
+        resolved = urljoin(base_url, cleaned)
+        parts = urlsplit(resolved)
+    except ValueError:
+        return None
+
+    if parts.scheme.lower() not in _SAFE_URL_SCHEMES:
+        return None
+
+    # Only links back to the site we are scraping are ours to publish.
+    base_host = urlsplit(base_url).hostname
+    if base_host and parts.hostname != base_host:
+        return None
+
+    for char, encoded in _URL_MARKDOWN_ESCAPES.items():
+        resolved = resolved.replace(char, encoded)
+    return resolved
+
+
 def _parse_origin(card: Tag) -> tuple[str | None, str | None, str | None]:
     """Origin row: ``<a>Spanien</a>, <a>Navarra</a>, Cava``.
 
@@ -425,6 +521,14 @@ def _parse_origin(card: Tag) -> tuple[str | None, str | None, str | None]:
     )
 
 
+#: Paths on systembolaget.se whose trailing digits are a product id. Anything
+#: else — /sortiment/2020, a search or a campaign page — must not be scraped
+#: for a number, or a vintage becomes an article number.
+_PRODUCT_HREF = re.compile(
+    r"systembolaget\.se/(?:produkt/[^/]+/)?(\d{4,10})/?(?:[?#].*)?$", re.I
+)
+
+
 def _parse_article_number(card: Tag) -> str | None:
     """Article number from the Systembolaget link, or from adjacent text."""
     link = card.select_one('a[href*="systembolaget.se"]')
@@ -433,7 +537,7 @@ def _parse_article_number(card: Tag) -> str | None:
         if number := normalize_article_number(_text_of(span) or clean(link.get_text())):
             return number
         # Matches https://systembolaget.se/9049001 and /produkt/vin/.../9049001/
-        if match := re.search(r"(\d{4,10})/?(?:[?#].*)?$", link.get("href", "")):
+        if match := _PRODUCT_HREF.search(link.get("href", "")):
             return normalize_article_number(match.group(1))
 
     if match := re.search(r"Systembolaget:?\s*(\d{4,10})", clean(card.get_text()), re.I):
@@ -517,7 +621,7 @@ def _parse_wine_card(
         value_label=value_label,
         typical=card.select_one(".c-wine-info__typical") is not None,
         tasting_note=clean_or_none(_text_of(card.select_one(".c-wine-info__text"))),
-        review_url=urljoin(base_url, review_href) if review_href else None,
+        review_url=safe_url(review_href, base_url),
         article_number=article_number,
         product_url=build_product_url(article_number),
         release_id=release_id,

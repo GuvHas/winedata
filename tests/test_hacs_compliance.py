@@ -246,3 +246,141 @@ def test_workflows_do_not_pin_node20_actions() -> None:
                 f"{path.name}: actions/{name}@v{major} runs on Node 20; "
                 f"use v{floor} or newer"
             )
+
+
+def test_manifest_declares_every_home_assistant_component_it_uses() -> None:
+    """hassfest rejects a manifest that omits a component the code imports.
+
+    mqtt_bridge.py imports homeassistant.components.mqtt, which must be
+    declared. It belongs in `after_dependencies`, not `dependencies`: the
+    bridge is optional and fails soft when MQTT is not configured, so making
+    it a hard dependency would force MQTT on every install.
+    """
+    import json as _json
+    import re as _re
+
+    manifest = _json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))
+    declared = set(manifest.get("dependencies", [])) | set(
+        manifest.get("after_dependencies", [])
+    )
+
+    used: set[str] = set()
+    for path in COMPONENT.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        used |= set(_re.findall(r"from homeassistant\.components import (\w+)", source))
+        used |= set(_re.findall(r"from homeassistant\.components\.(\w+) import", source))
+
+    # Platforms the integration itself provides are not dependencies.
+    used -= {"sensor", "diagnostics"}
+
+    missing = used - declared
+    assert not missing, f"manifest does not declare: {sorted(missing)}"
+
+
+def test_mqtt_is_an_optional_dependency() -> None:
+    """MQTT must not be mandatory - the bridge is opt-in."""
+    import json as _json
+
+    manifest = _json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))
+    assert "mqtt" in manifest.get("after_dependencies", [])
+    assert "mqtt" not in manifest.get("dependencies", [])
+
+
+def test_brand_assets_are_present_and_valid() -> None:
+    """HACS checks the brands repository unless assets ship with the repo.
+
+    Its log names the path it looks for, so shipping them here satisfies the
+    check without a submission to home-assistant/brands.
+    """
+    import struct
+
+    brand = COMPONENT / "brand"
+    for name, expected in (
+        ("icon.png", 256),
+        ("icon@2x.png", 512),
+        ("logo.png", 256),
+        ("logo@2x.png", 512),
+    ):
+        path = brand / name
+        assert path.is_file(), f"missing brand asset {name}"
+        data = path.read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", f"{name} is not a PNG"
+        width, height = struct.unpack(">II", data[16:24])
+        assert (width, height) == (expected, expected), (
+            f"{name} is {width}x{height}, expected {expected}x{expected}"
+        )
+
+
+def test_manifest_keys_are_sorted_the_way_hassfest_requires() -> None:
+    """hassfest enforces: domain, name, then the rest alphabetically."""
+    import json as _json
+
+    keys = list(
+        _json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))
+    )
+    assert keys[:2] == ["domain", "name"], f"first two keys are {keys[:2]}"
+    rest = keys[2:]
+    assert rest == sorted(rest), f"keys after domain/name are not sorted: {rest}"
+
+
+def _release_workflow() -> dict:
+    """Parse the release workflow.
+
+    PyYAML follows YAML 1.1, where the unquoted key ``on`` is the boolean
+    ``True`` rather than the string ``"on"`` — so look under both.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    return workflow
+
+
+def test_merging_a_version_bump_publishes_the_release() -> None:
+    """A merge to main must publish the Release by itself.
+
+    HACS only offers versions that exist as published Releases. If releasing
+    needed a manual run, a merged version bump would sit in the manifest while
+    users kept being offered the previous version — exactly the state this
+    repository was in when the manifest said 1.0.3 and HACS offered 1.0.2.
+    """
+    workflow = _release_workflow()
+    triggers = workflow.get("on", workflow.get(True))
+    assert triggers is not None, "workflow declares no triggers"
+
+    assert "push" in triggers, "workflow does not run on any push"
+    branches = triggers["push"].get("branches") or []
+    assert "main" in branches, "a merge to main does not trigger the release"
+
+
+def test_the_tag_is_created_for_a_merge_not_only_a_manual_run() -> None:
+    """The tag step must cover the merge path too.
+
+    It was gated on ``workflow_dispatch``, which was correct while that was the
+    only way to release. A push to main has to create the tag as well; the only
+    event that must skip the step is a pushed tag, which already is the ref.
+    """
+    workflow = _release_workflow()
+    steps = workflow["jobs"]["release"]["steps"]
+    tag_steps = [s for s in steps if "tag if it does not exist" in s.get("name", "")]
+    assert tag_steps, "no tag-creation step"
+
+    condition = str(tag_steps[0].get("if", ""))
+    assert "workflow_dispatch" not in condition, (
+        "tag creation is still limited to manual runs, so a merge to main "
+        "would not produce a tag"
+    )
+    assert "refs/tags/" in condition, (
+        "tag creation should be skipped only when the ref already is the tag"
+    )
+
+
+def test_concurrent_merges_cannot_race_to_publish() -> None:
+    """Two merges landing together must not both try to create the tag."""
+    workflow = _release_workflow()
+    assert "concurrency" in workflow, (
+        "no concurrency guard: two pushes to main could race on the same tag"
+    )

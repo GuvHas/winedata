@@ -17,7 +17,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.ssl import get_default_context
 
-from .api import InvalidAuth, MunskankarnaClient, MunskankarnaError
+from .api import InvalidAuth, MunskankarnaClient, MunskankarnaError, RateLimited
 from .const import (
     CONF_BASE_URL,
     CONF_KINDS,
@@ -30,6 +30,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_TOP_COUNT,
     DOMAIN,
+    MAX_TOP_COUNT,
     VALUE_ORDER,
 )
 from .parser import ParseResult, ReleaseDict, WineDict
@@ -126,8 +127,19 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     @property
     def top_count(self) -> int:
-        """How many wines each sensor exposes in its attributes."""
-        return int(self.entry.options.get(CONF_TOP_COUNT) or DEFAULT_TOP_COUNT)
+        """How many wines each sensor exposes in its attributes.
+
+        Clamped rather than trusted: the options schema only constrains a form
+        being submitted, so an entry saved under an older, higher ceiling would
+        otherwise keep recording that many wines forever.
+        """
+        try:
+            value = int(self.entry.options.get(CONF_TOP_COUNT) or DEFAULT_TOP_COUNT)
+        except (TypeError, ValueError):
+            return DEFAULT_TOP_COUNT
+        if value < 1:
+            return DEFAULT_TOP_COUNT
+        return min(value, MAX_TOP_COUNT)
 
     def _client(self) -> MunskankarnaClient:
         """Build an API client for one update cycle.
@@ -188,6 +200,10 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Fetch the index and every configured release using the active client."""
         try:
             index = await self._async_fetch_index()
+        except RateLimited as err:
+            raise UpdateFailed(
+                f"Rate limited by Munskänkarna: {err}. Consider a longer update interval."
+            ) from err
         except MunskankarnaError as err:
             raise UpdateFailed(f"Could not fetch the Munskänkarna release index: {err}") from err
 
@@ -204,6 +220,16 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for kind, release in wanted.items():
             try:
                 result = await self._async_fetch_release(release["id"], release["title"])
+            except RateLimited as err:
+                # Stop the cycle rather than keep requesting from a server that
+                # has just asked us to back off. Whatever loaded before the
+                # limit is still published.
+                warnings.append(f"{release['id']}: {err}")
+                _LOGGER.warning(
+                    "Rate limited fetching %s; abandoning the rest of this update",
+                    release["id"],
+                )
+                break
             except MunskankarnaError as err:
                 # One bad release must not blank the other sensors.
                 warnings.append(f"{release['id']}: {err}")

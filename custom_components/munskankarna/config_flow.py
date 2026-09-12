@@ -25,7 +25,7 @@ from homeassistant.helpers.selector import (
 )
 from homeassistant.util.ssl import get_default_context
 
-from .api import CannotConnect, InvalidAuth, async_validate_credentials
+from .api import CannotConnect, InvalidAuth, RateLimited, async_validate_credentials
 from .const import (
     ALL_KINDS,
     CONF_BASE_URL,
@@ -114,7 +114,10 @@ class MunskankarnaConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
-            except CannotConnect:
+            except (CannotConnect, RateLimited):
+                # RateLimited is a sibling of CannotConnect, not a subclass;
+                # without it here an ordinary 429 showed the user "unknown"
+                # and logged a traceback.
                 errors["base"] = "cannot_connect"
             except Exception:  # noqa: BLE001 - never leak a traceback into the UI
                 _LOGGER.exception("Unexpected error validating Munskänkarna setup")
@@ -167,7 +170,10 @@ class MunskankarnaConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
-            except CannotConnect:
+            except (CannotConnect, RateLimited):
+                # RateLimited is a sibling of CannotConnect, not a subclass;
+                # without it here an ordinary 429 showed the user "unknown"
+                # and logged a traceback.
                 errors["base"] = "cannot_connect"
             except Exception:  # noqa: BLE001 - never leak a traceback into the UI
                 _LOGGER.exception("Unexpected error during Munskänkarna reauthentication")

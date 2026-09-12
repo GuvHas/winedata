@@ -32,7 +32,19 @@ MAX_SCAN_INTERVAL_HOURS: Final = 168
 #: recorder and broadcast over the websocket on every update, so this is kept
 #: small deliberately: 10 wines is roughly 2.3 kB, the full release ~49 kB.
 DEFAULT_TOP_COUNT: Final = 10
-MAX_TOP_COUNT: Final = 40
+
+#: Ceiling on the configurable wine list. Each entry costs roughly 500 bytes of
+#: attribute payload, which is recorded and broadcast on every update: 40 wines
+#: measured at ~20 kB per update, or tens of megabytes of recorder growth per
+#: year per sensor. 25 keeps the worst case near 13 kB; the default of 10 is
+#: about 6 kB.
+MAX_TOP_COUNT: Final = 25
+
+#: Cap on the release `summary` attribute. Most tastings publish a sentence,
+#: but Webbviner publishes a full editorial listing (~1500 characters) into the
+#: same field. Attributes are recorded and broadcast on every update, so this
+#: is bounded rather than trusted.
+MAX_SUMMARY_LENGTH: Final = 280
 
 DEFAULT_MQTT_TOPIC: Final = "munskankarna/wines"
 

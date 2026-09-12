@@ -55,8 +55,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry)
 async def async_unload_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry) -> bool:
     """Unload a config entry."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded and not _loaded_entries(hass):
-        # Services are domain-wide, so they go with the last remaining entry.
+
+    # `entry` is still reported as loaded while its own unload is in progress,
+    # so it is excluded explicitly. Without that the "last entry" test never
+    # fired and the domain services outlived the integration, leaving
+    # munskankarna.trigger_sync registered but wired to nothing.
+    if unloaded and not _loaded_entries(hass, exclude=entry.entry_id):
         for service in (SERVICE_TRIGGER_SYNC, SERVICE_PUBLISH_MQTT):
             if hass.services.has_service(DOMAIN, service):
                 hass.services.async_remove(DOMAIN, service)
@@ -68,12 +72,15 @@ async def async_reload_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry
     await hass.config_entries.async_reload(entry.entry_id)
 
 
-def _loaded_entries(hass: HomeAssistant) -> list[MunskankarnaConfigEntry]:
-    """Entries that are still loaded, excluding one being unloaded right now."""
+def _loaded_entries(
+    hass: HomeAssistant, exclude: str | None = None
+) -> list[MunskankarnaConfigEntry]:
+    """Entries with a live coordinator, optionally skipping one entry id."""
     return [
         entry
         for entry in hass.config_entries.async_loaded_entries(DOMAIN)
-        if isinstance(getattr(entry, "runtime_data", None), MunskankarnaCoordinator)
+        if entry.entry_id != exclude
+        and isinstance(getattr(entry, "runtime_data", None), MunskankarnaCoordinator)
     ]
 
 

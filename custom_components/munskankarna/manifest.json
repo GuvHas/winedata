@@ -1,6 +1,9 @@
 {
   "domain": "munskankarna",
   "name": "Munskänkarna",
+  "after_dependencies": [
+    "mqtt"
+  ],
   "codeowners": [
     "@GuvHas"
   ],
@@ -13,5 +16,5 @@
     "httpx>=0.27.0",
     "beautifulsoup4>=4.12.0"
   ],
-  "version": "1.0.2"
+  "version": "1.0.3"
 }
