@@ -201,3 +201,79 @@ async def test_trigger_sync_button_targets_a_real_service(
         domain, service = action.split(".", 1)
         assert hass.services.has_service(domain, service), f"{action} is not registered"
     assert f"{DOMAIN}.trigger_sync" in find_actions(dashboard)
+
+
+# ---------------------------------------------------------------------------
+# Optional fields are genuinely optional — the cards must survive them
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def configured_sparse(hass: HomeAssistant):
+    """An integration whose wines are missing every optional field.
+
+    The parser permits all of these to be None — `test_a_card_missing_every_
+    optional_field_still_parses` pins that — so a card must render them.
+    """
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT], CONF_TOP_COUNT: 5})
+    sparse = build_wine(
+        RELEASE_ID, "Ofullständigt Vin", None, value=None, price=None, article_number=None
+    )
+    sparse.update(
+        {
+            "producer": None,
+            "volume_ml": None,
+            "price_per_litre": None,
+            "vintage": None,
+            "country": None,
+            "region": None,
+            "band": None,
+            "score_label": None,
+            "value_label": None,
+            "full_name": None,
+        }
+    )
+
+    async def fake_fetch(self, release_id: str, title: str) -> dict:  # noqa: ANN001
+        return {
+            "release": build_release(release_id, KIND_TILLFALLIGT, "2026-09-11", wine_count=1),
+            "wines": [dict(sparse)],
+            "warnings": [],
+            "page_valid": True,
+        }
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator,
+            "_async_fetch_index",
+            new=AsyncMock(return_value=[build_release(RELEASE_ID, KIND_TILLFALLIGT, "2026-09-11")]),
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    return entry
+
+
+async def test_every_template_survives_missing_fields(
+    hass: HomeAssistant, configured_sparse, dashboard: dict
+) -> None:
+    """`round(0)` on a missing price raises and takes the whole card down.
+
+    A Lovelace markdown card that raises renders as a red error box, so one
+    wine with no price destroyed the entire release table — not just its row.
+    """
+    for source in _templates(dashboard):
+        # A raise here is the bug: the card would show a template error.
+        output = Template(source, hass).async_render(parse_result=False)
+        assert "None" not in output, f"a missing field rendered as None:\n{output[:400]}"
+
+
+async def test_missing_values_render_as_an_em_dash(
+    hass: HomeAssistant, configured_sparse, dashboard: dict
+) -> None:
+    """The fallback must be visible, not an empty cell that looks like 0 kr."""
+    source = next(t for t in _templates(dashboard) if "🏆" in t)
+    output = Template(source, hass).async_render(parse_result=False)
+    assert "Ofullständigt Vin" in output, "the card dropped the wine entirely"
+    assert "—" in output, "a missing price/score/producer left no visible placeholder"
