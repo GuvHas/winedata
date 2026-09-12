@@ -124,6 +124,11 @@ class ParseResult(TypedDict):
     release: ReleaseDict
     wines: list[WineDict]
     warnings: list[str]
+    #: True when the page was recognised as a Vinlocus release page at all.
+    #: Zero wines means "a quiet week" only when this is True; when it is
+    #: False the page was something else entirely — maintenance, a login wall,
+    #: a redesign — and its emptiness says nothing about the release.
+    page_valid: bool
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +633,15 @@ def _parse_wine_card(
     )
 
 
+#: Markup that identifies a Vinlocus release page, whatever it contains. Used
+#: to tell "this release has no wines this week" apart from "this is not a
+#: release page", which parse to the same empty wine list.
+_RELEASE_PAGE_MARKERS: Final[tuple[str, ...]] = (
+    "#wine-bottles-list",
+    ".c-wine-contentdescription",
+)
+
+
 def parse_release_page(
     html: str,
     release_id: str,
@@ -666,6 +680,15 @@ def parse_release_page(
         wine_count=0,
     )
 
+    # Whether this is a release page at all, independent of how many wines it
+    # holds. Both markers are specific to Vinlocus release pages: a
+    # maintenance page, a login wall, a JSON error body or a redesigned
+    # template has neither, while a genuinely empty holiday-week release still
+    # renders its container and its description.
+    page_valid = any(
+        soup.select_one(selector) is not None for selector in _RELEASE_PAGE_MARKERS
+    )
+
     # Cards live in `ul#wine-bottles-list`; `li.wine-section` rows are colour
     # headings that apply to the cards following them.
     items = soup.select("#wine-bottles-list > li")
@@ -692,12 +715,20 @@ def parse_release_page(
 
     if not wines:
         warnings.append(
-            f"No wines found for {release_id} — the page markup may have changed, "
-            "or the release may require an authenticated session."
+            f"No wines found for {release_id} — "
+            + (
+                "the release appears to be empty."
+                if page_valid
+                else "the page was not recognised as a release page at all; the site "
+                "may be under maintenance, the layout may have changed, or the "
+                "release may require an authenticated session."
+            )
         )
 
     release["wine_count"] = len(wines)
-    return ParseResult(release=release, wines=wines, warnings=warnings)
+    return ParseResult(
+        release=release, wines=wines, warnings=warnings, page_valid=page_valid
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -236,6 +236,21 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 _LOGGER.warning("Could not fetch release %s: %s", release["id"], err)
                 continue
 
+            if not result.get("page_valid", True):
+                # An unrecognised page parses to zero wines just like a quiet
+                # week does. Accepting it would replace good cached data with a
+                # 0-wine state; skipping it leaves the previous data in place
+                # and, if nothing else loaded, fails the update below.
+                warnings.append(
+                    f"{release['id']}: the page was not recognised as a release page"
+                )
+                _LOGGER.warning(
+                    "Release %s did not look like a release page; keeping the previous "
+                    "data for this tasting type",
+                    release["id"],
+                )
+                continue
+
             result["wines"] = sort_wines(result["wines"])
             warnings.extend(result.get("warnings") or [])
             releases[kind] = result
