@@ -200,10 +200,14 @@ async def async_setup_entry(
         MunskankarnaGlobalSensor(coordinator, entry, description)
         for description in GLOBAL_SENSORS
     ]
-    # One sensor per tasting type that actually loaded.
+    # One sensor per *configured* tasting type, not merely per type that
+    # loaded on the first poll. Platform setup runs once, so keying this on the
+    # first update meant a release that was down during startup never got an
+    # entity and could not gain one by recovering — only a reload helped.
+    # `MunskankarnaReleaseSensor.available` already reports the missing ones as
+    # unavailable, which is the behaviour this restores.
     entities.extend(
-        MunskankarnaReleaseSensor(coordinator, entry, kind)
-        for kind in (coordinator.data["releases"] if coordinator.data else {})
+        MunskankarnaReleaseSensor(coordinator, entry, kind) for kind in coordinator.kinds
     )
     async_add_entities(entities)
 
