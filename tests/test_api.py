@@ -16,6 +16,7 @@ from custom_components.munskankarna.api import (
     CannotConnect,
     InvalidAuth,
     MunskankarnaClient,
+    RateLimited,
 )
 from custom_components.munskankarna.const import DEFAULT_BASE_URL
 
@@ -313,3 +314,76 @@ async def test_login_is_idempotent() -> None:
         assert await client.async_login() is True
 
     assert login.call_count == 1, f"logged in {login.call_count} times"
+
+
+# ---------------------------------------------------------------------------
+# Login must require proof, not merely the absence of a form
+# ---------------------------------------------------------------------------
+
+
+MAINTENANCE_PAGE = "<html><body><h1>Underhåll pågår</h1></body></html>"
+UNRELATED_PAGE = "<html><body><h1>Vinlocus</h1><p>Provningar</p></body></html>"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        # Being told to slow down is not an authentication outcome at all.
+        (429, "<html><body>Too many requests</body></html>", RateLimited),
+        # Nor is the site being down.
+        (503, MAINTENANCE_PAGE, CannotConnect),
+        (500, MAINTENANCE_PAGE, CannotConnect),
+        # A 200 that proves nothing either way must not be read as success.
+        # CannotConnect rather than InvalidAuth on purpose: we cannot tell a
+        # rejection from a layout change here, and prompting the user to
+        # re-enter working credentials is the more destructive guess.
+        (200, UNRELATED_PAGE, CannotConnect),
+        (200, "", CannotConnect),
+    ],
+)
+async def test_login_never_authenticates_without_positive_proof(
+    status: int, body: str, expected: type[Exception]
+) -> None:
+    """The absence of a password field is not evidence of a session.
+
+    Every one of these responses lacks an `input[name=Password]`, which was the
+    whole of the old success test — so all of them authenticated, and a rate
+    limit or a maintenance page silently became `authenticated = True`.
+    """
+    respx.get(DEFAULT_BASE_URL + "/").mock(return_value=httpx.Response(200, text=LOGIN_PAGE))
+    respx.post(DEFAULT_BASE_URL + "/").mock(return_value=httpx.Response(status, text=body))
+
+    client = MunskankarnaClient(DEFAULT_BASE_URL, username="u", password="p")
+    async with client:
+        with pytest.raises(expected):
+            await client.async_login()
+        assert client.authenticated is False, "a failed login left the client marked as authed"
+
+
+@respx.mock
+async def test_login_rate_limit_carries_the_retry_after() -> None:
+    """A 429 on the login POST must surface its cooldown like any other."""
+    respx.get(DEFAULT_BASE_URL + "/").mock(return_value=httpx.Response(200, text=LOGIN_PAGE))
+    respx.post(DEFAULT_BASE_URL + "/").mock(
+        return_value=httpx.Response(429, text="slow down", headers={"Retry-After": "1800"})
+    )
+
+    client = MunskankarnaClient(DEFAULT_BASE_URL, username="u", password="p")
+    async with client:
+        with pytest.raises(RateLimited) as excinfo:
+            await client.async_login()
+    assert excinfo.value.retry_after == 1800
+
+
+@respx.mock
+async def test_login_accepts_the_logged_in_chrome_as_proof() -> None:
+    """The positive signal is the member chrome, not an absent form."""
+    respx.get(DEFAULT_BASE_URL + "/").mock(return_value=httpx.Response(200, text=LOGIN_PAGE))
+    respx.post(DEFAULT_BASE_URL + "/").mock(
+        return_value=httpx.Response(200, text=LOGGED_IN_PAGE)
+    )
+    client = MunskankarnaClient(DEFAULT_BASE_URL, username="u", password="p")
+    async with client:
+        assert await client.async_login() is True
+        assert client.authenticated is True
