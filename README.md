@@ -158,7 +158,13 @@ verdict, then price.
 A complete two-view dashboard is in
 [`dashboard/munskankarna-lovelace.yaml`](dashboard/munskankarna-lovelace.yaml)
 (**Settings → Dashboards → + → ⋮ → Raw configuration editor**). It uses only
-built-in cards — no HACS frontend plugins. Two highlights:
+built-in cards — no HACS frontend plugins.
+
+Every optional field is guarded with `is not none`. That is not decoration: a
+markdown card that raises renders as a red error box, so one wine with no price
+would take out the whole table rather than its own row.
+
+Two highlights:
 
 ### Mobile — this week's picks
 
@@ -181,9 +187,10 @@ content: >-
 
   {% for w in wines -%}
 
-  | **{{ w.score }}** | [{{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif
-  %}]({{ w.url or w.review_url }}){% if w.value == 'fynd' %} ⭐{% endif %} |
-  {{ w.price | round(0) }} kr |
+  | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif %}** |
+  [{{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif %}]({{ w.url or
+  w.review_url }}){% if w.value == 'fynd' %} ⭐{% endif %} | {% if w.price is
+  not none %}{{ w.price | round(0) }} kr{% else %}—{% endif %} |
 
   {% endfor %}
 
@@ -209,10 +216,13 @@ content: >-
 
   {% for w in wines -%}
 
-  | **{{ w.score }}** | {{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif
-  %}<br><sub>{{ w.producer }}</sub> | {{ w.country }}{% if w.region %},
-  {{ w.region }}{% endif %} | {{ w.price | round(0) }} kr |
-  {{ w.price_per_litre | round(0) }} | {% if w.url %}[🔗]({{ w.url }}){% endif %} |
+  | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif %}** |
+  {{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif %}<br><sub>{{
+  w.producer or '—' }}</sub> | {{ w.country or '—' }}{% if w.region %},
+  {{ w.region }}{% endif %} | {% if w.price is not none %}{{ w.price | round(0)
+  }} kr{% else %}—{% endif %} | {% if w.price_per_litre is not none %}{{
+  w.price_per_litre | round(0) }}{% else %}—{% endif %} | {% if w.url
+  %}[🔗]({{ w.url }}){% endif %} |
 
   {% endfor %}
 
@@ -282,6 +292,19 @@ also what lets discovered entities survive a restart.
 Requires the MQTT integration. Without it, the service logs a warning and does
 nothing; your sensors are unaffected.
 
+**Topics are scoped to the config entry.** Discovery goes to
+`homeassistant/sensor/munskankarna_<entry_id>/<kind>/config` and state, unless
+you pass a `topic`, to `munskankarna/wines/<entry_id>/<kind>/state`. Retained
+messages are keyed by topic, so without the entry id a second entry — or a
+second Home Assistant sharing the broker — would overwrite the first's
+discovery config and the two would collapse into one entity.
+
+> [!NOTE]
+> If you used the MQTT bridge before 1.0.4, the old retained messages are
+> still on the broker under the unscoped topics and the discovered entity will
+> be re-created under a new id. Clear the stale ones by publishing an empty
+> retained payload to `homeassistant/sensor/munskankarna_<kind>/config`.
+
 ## How it stays current
 
 Every update cycle the integration re-reads Munskänkarna's release index and
@@ -295,8 +318,14 @@ Two things worth knowing:
 - A release whose title has **no parseable date** will not displace a dated one.
   That is deliberate (it stops an oddly-titled special hiding the current week),
   but such a release is skipped.
-- Sensors are created for the tasting types that loaded **at setup time**.
-  Enabling a new type in Options reloads the entry and creates its sensor.
+- Sensors are created for **every tasting type you have enabled**, whether or
+  not its page loaded on the first poll. One that was unreachable at startup
+  reads `unavailable` and starts reporting as soon as a later poll succeeds —
+  no reload. Enabling a new type in Options reloads the entry and adds it.
+- A page that cannot be recognised as a release page at all — maintenance, a
+  login wall, a redesign — **fails the update rather than reporting zero
+  wines**, so the last good data stays on the sensor instead of being replaced
+  by an authoritative-looking `0`.
 
 One client with one login serves an entire update cycle, and all I/O is
 non-blocking `httpx` — nothing touches the event loop.
@@ -324,7 +353,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 288 tests
+python -m pytest          # 310 tests
 ruff check custom_components tests
 ```
 
