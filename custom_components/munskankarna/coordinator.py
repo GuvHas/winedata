@@ -8,8 +8,9 @@ then thin projections over that prepared shape.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
-from typing import Any, TypedDict
+from typing import Any, Final, TypedDict
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -39,6 +40,14 @@ _LOGGER = logging.getLogger(__name__)
 
 #: Unrated wines sort last, whichever direction is being applied.
 _UNRATED_RANK = len(VALUE_ORDER) + 1
+
+#: Cooldown applied when a 429 arrives with no usable Retry-After. Being told
+#: to slow down without being told for how long still has to mean something.
+_DEFAULT_COOLDOWN: Final = 900.0
+
+#: Ceiling on an honoured Retry-After. A misconfigured or hostile header could
+#: otherwise park the integration for days with no way back but a reload.
+_MAX_COOLDOWN: Final = 6 * 3600.0
 
 
 
@@ -104,6 +113,10 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.entry = entry
         #: The client for the in-flight update cycle, if any.
         self._api: MunskankarnaClient | None = None
+        #: Monotonic deadline before which no request may be made, set from a
+        #: 429's Retry-After. Monotonic rather than wall clock so a system
+        #: clock change cannot extend or cancel it.
+        self._rate_limited_until: float = 0.0
         hours = entry.options.get(CONF_SCAN_INTERVAL_HOURS)
         interval = timedelta(hours=hours) if hours else DEFAULT_SCAN_INTERVAL
 
@@ -155,6 +168,24 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             verify=get_default_context(),
         )
 
+    # -- rate-limit cooldown -----------------------------------------------
+
+    @property
+    def cooldown_remaining(self) -> float:
+        """Seconds left before a request is permitted again; 0 when clear."""
+        return max(0.0, self._rate_limited_until - time.monotonic())
+
+    def _begin_cooldown(self, retry_after: float | None) -> float:
+        """Record when we may talk to the site again, and return that span."""
+        seconds = retry_after if retry_after and retry_after > 0 else _DEFAULT_COOLDOWN
+        seconds = min(seconds, _MAX_COOLDOWN)
+        self._rate_limited_until = time.monotonic() + seconds
+        _LOGGER.warning(
+            "Munskänkarna asked us to slow down; no further requests for %.0f minutes",
+            seconds / 60,
+        )
+        return seconds
+
     def _active_client(self) -> MunskankarnaClient:
         """The client for the update cycle currently in flight."""
         if self._api is None:
@@ -182,6 +213,16 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         One client and one login serve the whole cycle.
         """
+        # Checked before a client is built, so a cooldown costs no connection,
+        # no SSL setup and above all no login POST. This is enforced for a
+        # manual refresh exactly as for a scheduled one: pressing the button
+        # is not a reason to ignore the site asking for quiet.
+        if (remaining := self.cooldown_remaining) > 0:
+            raise UpdateFailed(
+                "Rate limited by Munskänkarna; not requesting again for another "
+                f"{remaining / 60:.0f} min"
+            )
+
         async with self._client() as client:
             self._api = client
             try:
@@ -189,6 +230,13 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 # returns False here and simply carries on.
                 await client.async_login()
                 return await self._async_collect()
+            except RateLimited as err:
+                # Reachable from the login request itself, which is a request
+                # like any other and must start the cooldown too.
+                self._begin_cooldown(err.retry_after)
+                raise UpdateFailed(
+                    f"Rate limited by Munskänkarna: {err}. Consider a longer update interval."
+                ) from err
             except InvalidAuth as err:
                 raise ConfigEntryAuthFailed(
                     "Munskänkarna rejected the configured credentials"
@@ -201,6 +249,7 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         try:
             index = await self._async_fetch_index()
         except RateLimited as err:
+            self._begin_cooldown(err.retry_after)
             raise UpdateFailed(
                 f"Rate limited by Munskänkarna: {err}. Consider a longer update interval."
             ) from err
@@ -216,6 +265,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         releases: dict[str, ParseResult] = {}
         warnings: list[str] = []
+        #: What the previous cycle published, so a kind that cannot be
+        #: refreshed keeps what it had rather than vanishing from the snapshot.
+        previous: dict[str, ParseResult] = (self.data or {}).get("releases", {})
 
         for kind, release in wanted.items():
             try:
@@ -223,7 +275,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             except RateLimited as err:
                 # Stop the cycle rather than keep requesting from a server that
                 # has just asked us to back off. Whatever loaded before the
-                # limit is still published.
+                # limit is still published — but the cooldown still applies, so
+                # the next poll does not walk straight back into the limit.
+                self._begin_cooldown(err.retry_after)
                 warnings.append(f"{release['id']}: {err}")
                 _LOGGER.warning(
                     "Rate limited fetching %s; abandoning the rest of this update",
@@ -236,14 +290,43 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 _LOGGER.warning("Could not fetch release %s: %s", release["id"], err)
                 continue
 
+            if not result.get("page_valid", True):
+                # An unrecognised page parses to zero wines just like a quiet
+                # week does. Accepting it would replace good cached data with a
+                # 0-wine state; skipping it leaves the previous data in place
+                # and, if nothing else loaded, fails the update below.
+                warnings.append(
+                    f"{release['id']}: the page was not recognised as a release page"
+                )
+                _LOGGER.warning(
+                    "Release %s did not look like a release page; keeping the previous "
+                    "data for this tasting type",
+                    release["id"],
+                )
+                continue
+
+
             result["wines"] = sort_wines(result["wines"])
             warnings.extend(result.get("warnings") or [])
             releases[kind] = result
 
+        # Nothing refreshed this cycle: fail, so Home Assistant keeps the whole
+        # previous snapshot rather than republishing it as if it were current.
         if not releases:
             raise UpdateFailed(
                 "Every configured release failed to load: " + "; ".join(warnings[:3])
             )
+
+        # At least one kind refreshed. Any kind that did not — a fetch error, an
+        # unrecognised page, or one the rate-limit `break` never reached — keeps
+        # its previous result. Without this the returned snapshot replaces the
+        # coordinator's entire data, so a partial failure silently discarded the
+        # failed kind's wines and took its sensor offline.
+        for kind in wanted:
+            if kind in releases:
+                continue
+            if (carried := previous.get(kind)) is not None:
+                releases[kind] = {**carried, "stale": True}
 
         return CoordinatorData(
             releases=releases,
@@ -290,6 +373,8 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     "date": result["release"]["date"],
                     "url": result["release"]["url"],
                     "wine_count": result["release"]["wine_count"],
+                    # Carried over from an earlier poll rather than refreshed.
+                    "stale": bool(result.get("stale")),
                     "wines": result["wines"][:cap],
                 }
                 for kind, result in self.data["releases"].items()

@@ -2,7 +2,7 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-41BDF5.svg)](https://www.home-assistant.io/)
-[![Version](https://img.shields.io/badge/version-1.0.3-blue.svg)](https://github.com/GuvHas/winedata/releases)
+[![Version](https://img.shields.io/badge/version-1.0.4-blue.svg)](https://github.com/GuvHas/winedata/releases)
 
 Weekly wine reviews from **Munskänkarna**, Sweden's wine society, matched to
 **Systembolaget's** catalog — on your dashboard, and available to automations.
@@ -12,6 +12,11 @@ scale and flags price/quality as *Fynd* → *Mer än prisvärt* → *Prisvärt* 
 *Ej prisvärt*. This integration tracks the current release of each tasting type
 and exposes every wine with its **article number and a direct product link**, so
 a bargain is one tap from the Systembolaget page.
+
+> [!NOTE]
+> An unofficial, community-built integration. Not affiliated with, endorsed by
+> or supported by Munskänkarna or Systembolaget — please send questions here,
+> not to them.
 
 ---
 
@@ -116,7 +121,7 @@ All entities are grouped under one **Munskänkarna** device.
 
 | Entity | State | Key attributes |
 |---|---|---|
-| `sensor.munskankarna_tillfalligt_sortiment` | wines in the release | `wines`, `release_title`, `release_date`, `release_url`, `summary` |
+| `sensor.munskankarna_tillfalligt_sortiment` | wines in the release | `wines`, `release_title`, `release_date`, `release_url`, `summary`, `stale` |
 | `sensor.munskankarna_fast_sortiment` | wines in the release | same |
 | `sensor.munskankarna_hitlista` | wines in the release | same |
 | `sensor.munskankarna_lokalt_och_smaskaligt` | wines in the release | same |
@@ -125,8 +130,10 @@ All entities are grouped under one **Munskänkarna** device.
 | `sensor.munskankarna_latest_release` | ISO date | `releases` |
 | `sensor.munskankarna_wines_tested` | total wines | `warnings` |
 
-A sensor only exists for a tasting type you have enabled, and goes
-`unavailable` if that particular release fails to load — the others keep working.
+A sensor exists for every tasting type you have enabled. If its release cannot
+be refreshed on a given poll, it keeps the wines from the last successful one
+and sets `stale: true` rather than blanking — it only reads `unavailable` if it
+has never loaded. The other types are unaffected either way.
 
 ### Shape of a `wines` entry
 
@@ -158,7 +165,13 @@ verdict, then price.
 A complete two-view dashboard is in
 [`dashboard/munskankarna-lovelace.yaml`](dashboard/munskankarna-lovelace.yaml)
 (**Settings → Dashboards → + → ⋮ → Raw configuration editor**). It uses only
-built-in cards — no HACS frontend plugins. Two highlights:
+built-in cards — no HACS frontend plugins.
+
+Every optional field is guarded with `is not none`. That is not decoration: a
+markdown card that raises renders as a red error box, so one wine with no price
+would take out the whole table rather than its own row.
+
+Two highlights:
 
 ### Mobile — this week's picks
 
@@ -181,9 +194,10 @@ content: >-
 
   {% for w in wines -%}
 
-  | **{{ w.score }}** | [{{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif
-  %}]({{ w.url or w.review_url }}){% if w.value == 'fynd' %} ⭐{% endif %} |
-  {{ w.price | round(0) }} kr |
+  | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif %}** |
+  [{{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif %}]({{ w.url or
+  w.review_url }}){% if w.value == 'fynd' %} ⭐{% endif %} | {% if w.price is
+  not none %}{{ w.price | round(0) }} kr{% else %}—{% endif %} |
 
   {% endfor %}
 
@@ -209,10 +223,13 @@ content: >-
 
   {% for w in wines -%}
 
-  | **{{ w.score }}** | {{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif
-  %}<br><sub>{{ w.producer }}</sub> | {{ w.country }}{% if w.region %},
-  {{ w.region }}{% endif %} | {{ w.price | round(0) }} kr |
-  {{ w.price_per_litre | round(0) }} | {% if w.url %}[🔗]({{ w.url }}){% endif %} |
+  | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif %}** |
+  {{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif %}<br><sub>{{
+  w.producer or '—' }}</sub> | {{ w.country or '—' }}{% if w.region %},
+  {{ w.region }}{% endif %} | {% if w.price is not none %}{{ w.price | round(0)
+  }} kr{% else %}—{% endif %} | {% if w.price_per_litre is not none %}{{
+  w.price_per_litre | round(0) }}{% else %}—{% endif %} | {% if w.url
+  %}[🔗]({{ w.url }}){% endif %} |
 
   {% endfor %}
 
@@ -282,6 +299,19 @@ also what lets discovered entities survive a restart.
 Requires the MQTT integration. Without it, the service logs a warning and does
 nothing; your sensors are unaffected.
 
+**Topics are scoped to the config entry.** Discovery goes to
+`homeassistant/sensor/munskankarna_<entry_id>/<kind>/config` and state, unless
+you pass a `topic`, to `munskankarna/wines/<entry_id>/<kind>/state`. Retained
+messages are keyed by topic, so without the entry id a second entry — or a
+second Home Assistant sharing the broker — would overwrite the first's
+discovery config and the two would collapse into one entity.
+
+> [!NOTE]
+> If you used the MQTT bridge before 1.0.4, the old retained messages are
+> still on the broker under the unscoped topics and the discovered entity will
+> be re-created under a new id. Clear the stale ones by publishing an empty
+> retained payload to `homeassistant/sensor/munskankarna_<kind>/config`.
+
 ## How it stays current
 
 Every update cycle the integration re-reads Munskänkarna's release index and
@@ -295,8 +325,18 @@ Two things worth knowing:
 - A release whose title has **no parseable date** will not displace a dated one.
   That is deliberate (it stops an oddly-titled special hiding the current week),
   but such a release is skipped.
-- Sensors are created for the tasting types that loaded **at setup time**.
-  Enabling a new type in Options reloads the entry and creates its sensor.
+- Sensors are created for **every tasting type you have enabled**, whether or
+  not its page loaded on the first poll. One that was unreachable at startup
+  reads `unavailable` and starts reporting as soon as a later poll succeeds —
+  no reload. Enabling a new type in Options reloads the entry and adds it.
+- A page that cannot be recognised as a release page at all — maintenance, a
+  login wall, a redesign — **never reports zero wines**. That tasting type
+  keeps its previous wines, flagged `stale: true`; if *nothing* could be
+  refreshed the whole update fails, so every sensor keeps what it had. Either
+  way an authoritative-looking `0` is never published.
+- Recognition requires the wine list itself, not just the surrounding page. A
+  redesign that keeps the chrome but renames the cards is treated as broken,
+  not as a quiet week.
 
 One client with one login serves an entire update cycle, and all I/O is
 non-blocking `httpx` — nothing touches the event loop.
@@ -317,6 +357,13 @@ diagnostics from the integration page — credentials are redacted.
 Munskänkarna rejected the stored credentials. The reauth dialog only replaces
 the username and password; your base URL and options are preserved.
 
+**Updates have stopped and the log says "asked us to slow down"**
+Munskänkarna returned HTTP 429 and named a cooldown, which the integration now
+honours — no request is made until it expires, and pressing *Uppdatera nu* will
+not override it. Download diagnostics to see
+`coordinator.rate_limit_cooldown_seconds`. If it recurs, raise the update
+interval in Options; the reviews are published weekly at most.
+
 **"Detected blocking call to load_verify_locations"**
 Fixed in 1.0.1 — update the integration.
 
@@ -324,7 +371,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 288 tests
+python -m pytest          # 321 tests
 ruff check custom_components tests
 ```
 
@@ -366,3 +413,25 @@ fails for an unrelated reason; it is idempotent, as is the whole workflow.
 > Forgetting the version bump is the one way to ship nothing: the code reaches
 > `main` but HACS keeps offering the previous version, since there is no new
 > Release to offer. The notice in the workflow log is there to catch it.
+
+## Attribution
+
+The reviews, scores and value verdicts this integration surfaces are the work of
+**[Munskänkarna](https://www.munskankarna.se)**, Sweden's wine society, and
+remain theirs. Article numbers and product pages belong to
+**[Systembolaget](https://www.systembolaget.se)**.
+
+This project is built and maintained by [@GuvHas](https://github.com/GuvHas) as
+an independent, unofficial integration. It is **not affiliated with, endorsed by
+or supported by Munskänkarna or Systembolaget**, and neither organisation is
+responsible for it or for anything it displays. Bugs, questions and feature
+requests belong in this repository's
+[issue tracker](https://github.com/GuvHas/winedata/issues) — please do not take
+them to Munskänkarna or Systembolaget.
+
+It reads Munskänkarna's **public** review pages; credentials are optional and
+only needed for member-only content. Requests identify themselves honestly
+rather than impersonating a browser, are spaced out, are limited to one poll
+every few hours by default, and stop entirely when the site asks them to. If you
+value the reviews, [support Munskänkarna](https://www.munskankarna.se) by
+becoming a member.

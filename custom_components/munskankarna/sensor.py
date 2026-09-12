@@ -200,10 +200,14 @@ async def async_setup_entry(
         MunskankarnaGlobalSensor(coordinator, entry, description)
         for description in GLOBAL_SENSORS
     ]
-    # One sensor per tasting type that actually loaded.
+    # One sensor per *configured* tasting type, not merely per type that
+    # loaded on the first poll. Platform setup runs once, so keying this on the
+    # first update meant a release that was down during startup never got an
+    # entity and could not gain one by recovering — only a reload helped.
+    # `MunskankarnaReleaseSensor.available` already reports the missing ones as
+    # unavailable, which is the behaviour this restores.
     entities.extend(
-        MunskankarnaReleaseSensor(coordinator, entry, kind)
-        for kind in (coordinator.data["releases"] if coordinator.data else {})
+        MunskankarnaReleaseSensor(coordinator, entry, kind) for kind in coordinator.kinds
     )
     async_add_entities(entities)
 
@@ -290,6 +294,10 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
             "release_title": markdown_safe(release["title"]),
             "release_date": release["date"],
             "release_url": release["url"],
+            # True when this cycle could not refresh the release and the
+            # previous result was carried over. Serving last week's wines is
+            # better than blanking the sensor, but it must not be silent.
+            "stale": bool(result.get("stale")),
             "summary": truncate(markdown_safe(release["summary"]), MAX_SUMMARY_LENGTH),
             "wines": [
                 wine_summary(w) for w in self.coordinator.top_wines(self._kind)

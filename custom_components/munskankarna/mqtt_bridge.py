@@ -86,20 +86,40 @@ def build_state_payload(
         "release_date": release["date"],
         "release_url": release["url"],
         "summary": release["summary"],
+        # A consumer outside Home Assistant needs the same staleness signal the
+        # sensor gets: this may be an earlier poll's wines, republished.
+        "stale": bool(result.get("stale")),
         "generated_at": coordinator.data["last_success"] if coordinator.data else None,
         "wines": [wine_summary(wine) for wine in result["wines"][:cap]],
     }
+
+
+def default_base_topic(coordinator: MunskankarnaCoordinator) -> str:
+    """The state-topic root used when the caller names none.
+
+    Scoped to the config entry. Two entries on one broker — a second Home
+    Assistant instance, or a second entry pointing at a different site — would
+    otherwise publish retained state to the same topic, and the later message
+    would simply replace the earlier one.
+
+    A caller that passes an explicit topic keeps it verbatim: sharing one is
+    then a deliberate choice rather than an accident of the default.
+    """
+    return f"{DEFAULT_MQTT_TOPIC}/{coordinator.entry.entry_id}"
 
 
 def build_discovery_config(
     coordinator: MunskankarnaCoordinator, kind: str, base_topic: str
 ) -> dict[str, Any]:
     """Build a Home Assistant MQTT-discovery config for one tasting kind."""
+    entry_id = coordinator.entry.entry_id
     state_topic = f"{base_topic}/{kind}/state"
     return {
         "name": KIND_LABELS.get(kind, kind),
-        "unique_id": f"{DOMAIN}_{coordinator.entry.entry_id}_{kind}",
-        "object_id": f"{DOMAIN}_{kind.replace('-', '_')}",
+        "unique_id": f"{DOMAIN}_{entry_id}_{kind}",
+        # Per entry as well: a shared object_id makes two discovered entities
+        # contend for one entity_id, and the loser is silently suffixed.
+        "object_id": f"{DOMAIN}_{kind.replace('-', '_')}_{entry_id}",
         "state_topic": state_topic,
         "value_template": "{{ value_json.state }}",
         "json_attributes_topic": state_topic,
@@ -109,9 +129,19 @@ def build_discovery_config(
     }
 
 
-def discovery_topic(kind: str, discovery_prefix: str = "homeassistant") -> str:
-    """Where Home Assistant looks for a discovered sensor's config."""
-    return f"{discovery_prefix}/sensor/{DOMAIN}_{kind.replace('-', '_')}/config"
+def discovery_topic(
+    coordinator: MunskankarnaCoordinator,
+    kind: str,
+    discovery_prefix: str = "homeassistant",
+) -> str:
+    """Where Home Assistant looks for a discovered sensor's config.
+
+    Includes the config entry id: discovery messages are retained and keyed by
+    topic, so without it a second entry's config overwrites the first's on the
+    broker and the two collapse into one entity.
+    """
+    node_id = f"{DOMAIN}_{coordinator.entry.entry_id}"
+    return f"{discovery_prefix}/sensor/{node_id}/{kind.replace('-', '_')}/config"
 
 
 async def async_publish_snapshot(
@@ -136,7 +166,7 @@ async def async_publish_snapshot(
         )
         return False
 
-    base_topic = (topic or DEFAULT_MQTT_TOPIC).rstrip("/")
+    base_topic = (topic or default_base_topic(coordinator)).rstrip("/")
 
     for kind in coordinator.data["releases"]:
         config = build_discovery_config(coordinator, kind, base_topic)
@@ -146,7 +176,7 @@ async def async_publish_snapshot(
             # can interpret the state message that follows.
             await mqtt.async_publish(
                 hass,
-                discovery_topic(kind, discovery_prefix),
+                discovery_topic(coordinator, kind, discovery_prefix),
                 json.dumps(config, ensure_ascii=False),
                 retain=retain,
             )

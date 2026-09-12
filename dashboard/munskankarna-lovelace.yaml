@@ -48,9 +48,11 @@ views:
 
               ## 🏆 {{ states(s) }}
 
-              **{{ state_attr(s,'score') }}/20** ·
-              {{ state_attr(s,'producer') }} ·
-              {{ state_attr(s,'price') | round(0) }} kr
+              **{% if state_attr(s,'score') is not none %}{{
+              state_attr(s,'score') }}{% else %}—{% endif %}/20** ·
+              {{ state_attr(s,'producer') or '—' }} ·
+              {% if state_attr(s,'price') is not none %}{{ state_attr(s,'price')
+              | round(0) }} kr{% else %}—{% endif %}
 
               {% if state_attr(s,'url') %}[Öppna på
               Systembolaget]({{ state_attr(s,'url') }}) ·
@@ -80,9 +82,11 @@ views:
 
               {% for w in wines -%}
 
-              | **{{ w.score }}** | [{{ w.name }}{% if w.vintage %} {{ w.vintage
-              }}{% endif %}]({{ w.url or w.review_url }}){% if w.value == 'fynd'
-              %} ⭐{% endif %} | {{ w.price | round(0) }} kr |
+              | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
+              %}** | [{{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif
+              %}]({{ w.url or w.review_url }}){% if w.value == 'fynd' %} ⭐{%
+              endif %} | {% if w.price is not none %}{{ w.price | round(0) }}
+              kr{% else %}—{% endif %} |
 
               {% endfor %}
 
@@ -146,11 +150,14 @@ views:
 
               {% for w in wines -%}
 
-              | **{{ w.score }}** | {{ w.name }}{% if w.vintage %} {{ w.vintage
-              }}{% endif %}<br><sub>{{ w.producer }}</sub> | {{ w.country }}{%
-              if w.region %}, {{ w.region }}{% endif %} | {{ w.price | round(0)
-              }} kr | {{ w.price_per_litre | round(0) }} | {% if w.url
-              %}[🔗]({{ w.url }}){% endif %} |
+              | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
+              %}** | {{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif
+              %}<br><sub>{{ w.producer or '—' }}</sub> | {{ w.country or '—'
+              }}{% if w.region %}, {{ w.region }}{% endif %} | {% if w.price is
+              not none %}{{ w.price | round(0) }} kr{% else %}—{% endif %} | {%
+              if w.price_per_litre is not none %}{{ w.price_per_litre | round(0)
+              }}{% else %}—{% endif %} | {% if w.url %}[🔗]({{ w.url }}){% endif
+              %} |
 
               {% endfor %}
 
@@ -174,9 +181,10 @@ views:
 
               {% for w in wines -%}
 
-              | **{{ w.score }}** | {{ w.name }}<br><sub>{{ w.producer }}</sub>
-              | {{ w.price | round(0) }} kr | {% if w.url %}[🔗]({{ w.url
-              }}){% endif %} |
+              | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
+              %}** | {{ w.name }}<br><sub>{{ w.producer or '—' }}</sub> | {% if
+              w.price is not none %}{{ w.price | round(0) }} kr{% else %}—{%
+              endif %} | {% if w.url %}[🔗]({{ w.url }}){% endif %} |
 
               {% endfor %}
 
@@ -200,8 +208,10 @@ views:
 
               {% for w in wines -%}
 
-              | **{{ w.score }}** | {{ w.name }} | {{ w.price | round(0) }} kr |
-              {% if w.url %}[🔗]({{ w.url }}){% endif %} |
+              | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
+              %}** | {{ w.name }} | {% if w.price is not none %}{{ w.price |
+              round(0) }} kr{% else %}—{% endif %} | {% if w.url %}[🔗]({{ w.url
+              }}){% endif %} |
 
               {% endfor %}
 

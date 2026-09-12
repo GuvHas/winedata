@@ -67,6 +67,17 @@ USER_AGENT: Final = (
 #: Cookie-name fragments that indicate an authenticated ASP.NET/Umbraco session.
 _AUTH_COOKIE_HINTS: Final[tuple[str, ...]] = ("identity", "aspxauth", "umb_", "member")
 
+#: Markup only a logged-in member is served. This is the *positive* proof of a
+#: session. Testing for the absence of the login form instead — as this
+#: originally did — passes for any page that simply has no form on it: a 429,
+#: a maintenance page and an unrelated 200 all authenticated.
+_MEMBER_CHROME_SELECTORS: Final[tuple[str, ...]] = (
+    ".js-nav-user-loggedin",
+    "a.js-logout",
+    'a[href*="member/logout"]',
+    'a[href*="/logout"]',
+)
+
 #: Politeness delay between consecutive requests, in seconds.
 _REQUEST_SPACING: Final = 0.75
 
@@ -291,9 +302,9 @@ class MunskankarnaClient:
         except httpx.HTTPError as err:
             raise CannotConnect(f"Login request failed: {err}") from err
 
-        self._authenticated = self._login_succeeded(response)
-        if not self._authenticated:
-            raise InvalidAuth("Munskänkarna rejected the supplied credentials")
+        # Raises unless the response actually proves a session was created.
+        self._verify_login(response)
+        self._authenticated = True
 
         _LOGGER.debug("Munskänkarna member session established")
         return True
@@ -312,22 +323,55 @@ class MunskankarnaClient:
 
         return hidden("__RequestVerificationToken"), hidden("ufprt")
 
-    def _login_succeeded(self, response: httpx.Response) -> bool:
-        """Decide whether a login POST actually authenticated us.
+    def _has_auth_cookie(self) -> bool:
+        """True when the jar carries an ASP.NET/Umbraco identity cookie."""
+        if self._client is None:
+            return False
+        return any(
+            any(hint in cookie.name.lower() for hint in _AUTH_COOKIE_HINTS) and cookie.value
+            for cookie in self._client.cookies.jar
+        )
 
-        Two independent signals, because Umbraco's response shape varies with
-        redirect configuration: an identity cookie on the jar, or the login
-        form no longer being rendered.
+    def _verify_login(self, response: httpx.Response) -> None:
+        """Raise unless the response proves a member session was established.
+
+        The status code is judged first: a 429 or a 5xx says nothing about the
+        credentials, and reading either as an outcome is how a rate limit came
+        to be recorded as a successful login.
+
+        Then a *positive* signal is required — an identity cookie, or the
+        member-only chrome in the body. Only when both are absent does the
+        shape of the page decide the error: the login form rendered again is
+        Umbraco's explicit rejection, while a page that is neither is unproven
+        rather than rejected, and is reported as a connection problem. The
+        distinction matters because `InvalidAuth` escalates to a reauth prompt,
+        and a site redesign must not ask the user to retype working credentials.
         """
-        if self._client is not None:
-            for cookie in self._client.cookies.jar:
-                name = cookie.name.lower()
-                if any(hint in name for hint in _AUTH_COOKIE_HINTS) and cookie.value:
-                    return True
+        status = response.status_code
+        if status == 429:
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            raise RateLimited(
+                "Rate limited by the Munskänkarna login endpoint"
+                + (f"; retry after {retry_after:.0f}s" if retry_after else ""),
+                retry_after,
+            )
+        if status >= 400:
+            raise CannotConnect(f"HTTP {status} from the Munskänkarna login endpoint")
+
+        if self._has_auth_cookie():
+            return
 
         soup = BeautifulSoup(response.text, "html.parser")
-        still_showing_form = soup.find("input", attrs={"name": "Password"}) is not None
-        return not still_showing_form
+        if any(soup.select_one(selector) for selector in _MEMBER_CHROME_SELECTORS):
+            return
+
+        if soup.find("input", attrs={"name": "Password"}) is not None:
+            raise InvalidAuth("Munskänkarna rejected the supplied credentials")
+
+        raise CannotConnect(
+            "Could not confirm the Munskänkarna login: the response carried neither a "
+            "session cookie nor the member chrome. The site layout may have changed."
+        )
 
     # -- high level --------------------------------------------------------
 

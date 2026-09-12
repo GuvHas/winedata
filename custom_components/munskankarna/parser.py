@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import UTC, datetime
-from typing import Any, Final, TypedDict
+from typing import Any, Final, NotRequired, TypedDict
 from urllib.parse import quote_plus, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
@@ -124,6 +124,14 @@ class ParseResult(TypedDict):
     release: ReleaseDict
     wines: list[WineDict]
     warnings: list[str]
+    #: True when the page was recognised as a Vinlocus release page at all.
+    #: Zero wines means "a quiet week" only when this is True; when it is
+    #: False the page was something else entirely — maintenance, a login wall,
+    #: a redesign — and its emptiness says nothing about the release.
+    page_valid: bool
+    #: Set by the coordinator, not the parser: this result was carried over
+    #: from an earlier poll because the current cycle could not refresh it.
+    stale: NotRequired[bool]
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +636,13 @@ def _parse_wine_card(
     )
 
 
+#: The wine list itself. Recognising a release page by an *outer* marker is not
+#: enough: a redesign can keep the page chrome while renaming the cards, and
+#: the page then parses to zero wines and passes as a quiet week. Only the
+#: container the wines actually come from can distinguish the two.
+_WINE_LIST_SELECTOR: Final = "#wine-bottles-list"
+
+
 def parse_release_page(
     html: str,
     release_id: str,
@@ -666,10 +681,15 @@ def parse_release_page(
         wine_count=0,
     )
 
+    has_wine_list = soup.select_one(_WINE_LIST_SELECTOR) is not None
+
     # Cards live in `ul#wine-bottles-list`; `li.wine-section` rows are colour
     # headings that apply to the cards following them.
-    items = soup.select("#wine-bottles-list > li")
+    items = soup.select(f"{_WINE_LIST_SELECTOR} > li")
     section_label = ""
+    #: Rows that should have yielded a wine. Counted so that "the list is
+    #: empty" can be told from "the list is full of things we cannot read".
+    card_candidates = 0
 
     for item in items:
         classes = item.get("class") or []
@@ -677,6 +697,7 @@ def parse_release_page(
             section_label = _text_of(item.select_one(".cat-header")) or _text_of(item)
             continue
 
+        card_candidates += 1
         card = item if "c-wine-info" in classes else item.select_one(".c-wine-info")
         if card is None:
             continue
@@ -690,14 +711,27 @@ def parse_release_page(
         seen.add(wine["id"])
         wines.append(wine)
 
+    # Recognised as a release page only if the wine list is there *and* either
+    # yielded wines or was genuinely empty. A list full of rows none of which
+    # parse is a redesign, not a quiet week, and must not publish a zero.
+    page_valid = has_wine_list and (bool(wines) or card_candidates == 0)
+
     if not wines:
         warnings.append(
-            f"No wines found for {release_id} — the page markup may have changed, "
-            "or the release may require an authenticated session."
+            f"No wines found for {release_id} — "
+            + (
+                "the release appears to be empty."
+                if page_valid
+                else "the page was not recognised as a release page at all; the site "
+                "may be under maintenance, the layout may have changed, or the "
+                "release may require an authenticated session."
+            )
         )
 
     release["wine_count"] = len(wines)
-    return ParseResult(release=release, wines=wines, warnings=warnings)
+    return ParseResult(
+        release=release, wines=wines, warnings=warnings, page_valid=page_valid
+    )
 
 
 # ---------------------------------------------------------------------------

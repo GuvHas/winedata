@@ -19,12 +19,10 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # `topics` and `description` are repository *settings*, not files, so
-          # nothing in a PR can satisfy them — they are set once under Settings
-          # -> General and About. Remove this ignore afterwards to re-enable
-          # both checks. Brand assets ship in custom_components/munskankarna/
-          # brand/, so the brands check is not ignored.
-          ignore: topics description
+          # No `ignore:` — every HACS check runs. `topics` and `description`
+          # are repository settings rather than files, so nothing in a PR could
+          # satisfy them; they are now set under Settings -> General and About.
+          # Brand assets ship in custom_components/munskankarna/brand/.
 
   hassfest:
     name: Hassfest

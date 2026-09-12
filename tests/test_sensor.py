@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
+from custom_components.munskankarna.api import CannotConnect
 from custom_components.munskankarna.const import (
     CONF_KINDS,
     CONF_TOP_COUNT,
@@ -244,3 +246,91 @@ async def test_trigger_sync_service_refreshes(hass: HomeAssistant) -> None:
     ) as refresh:
         await hass.services.async_call(DOMAIN, "trigger_sync", {}, blocking=True)
     refresh.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# A kind that fails during startup must still get an entity
+# ---------------------------------------------------------------------------
+
+
+async def test_a_kind_failing_at_startup_still_gets_a_sensor(hass: HomeAssistant) -> None:
+    """Entities must exist for every configured kind, not every loaded one.
+
+    Platform setup runs once. Creating entities only for the kinds present in
+    the first successful update meant a category whose page was down during
+    startup had no sensor at all — and no later success could create one,
+    because `async_setup_entry` never runs again. Reloading the integration
+    was the only cure, which is exactly what `available` exists to avoid.
+    """
+    entry = create_entry(
+        hass,
+        options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN], CONF_TOP_COUNT: 3},
+    )
+    payload = _wines()
+    remaining_failures = {KIND_HITLISTAN: 1}
+
+    async def flaky_fetch(self, release_id: str, title: str) -> dict:  # noqa: ANN001
+        kind = KIND_TILLFALLIGT if release_id.startswith("tillfalligt") else KIND_HITLISTAN
+        if remaining_failures.get(kind):
+            remaining_failures[kind] -= 1
+            raise CannotConnect(f"{kind} is down")
+        return {
+            "release": build_release(release_id, kind, "2026-09-11", wine_count=len(payload)),
+            "wines": list(payload),
+            "warnings": [],
+        }
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator, "_async_fetch_index", new=AsyncMock(return_value=_index())
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=flaky_fetch),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        entity_id = release_entity_id(hass, entry.entry_id, KIND_HITLISTAN)
+        assert entity_id is not None, "the kind that failed at startup never got a sensor"
+        assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+        # The one that loaded is unaffected.
+        working = hass.states.get(release_entity_id(hass, entry.entry_id, KIND_TILLFALLIGT))
+        assert working.state == "5"
+
+        # Next poll succeeds — no reload, no reconfiguration.
+        await entry.runtime_data.async_refresh()
+        await hass.async_block_till_done()
+
+    recovered = hass.states.get(entity_id)
+    assert recovered.state == "5", "the recovered kind did not populate"
+    assert recovered.attributes["kind"] == KIND_HITLISTAN
+    assert len(recovered.attributes["wines"]) == 3
+
+
+async def test_unavailable_release_sensor_exposes_no_stale_attributes(
+    hass: HomeAssistant,
+) -> None:
+    """An entity that exists but has no data must not serve a half-payload."""
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN]})
+
+    async def only_tillfalligt(self, release_id: str, title: str) -> dict:  # noqa: ANN001
+        if not release_id.startswith("tillfalligt"):
+            raise CannotConnect("down")
+        return {
+            "release": build_release(release_id, KIND_TILLFALLIGT, "2026-09-11", wine_count=1),
+            "wines": [build_wine(release_id, "Enda Vinet")],
+            "warnings": [],
+        }
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator, "_async_fetch_index", new=AsyncMock(return_value=_index())
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=only_tillfalligt),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    state = hass.states.get(release_entity_id(hass, entry.entry_id, KIND_HITLISTAN))
+    assert state.state == STATE_UNAVAILABLE
+    assert "wines" not in state.attributes

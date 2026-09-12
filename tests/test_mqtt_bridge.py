@@ -187,3 +187,103 @@ async def test_publish_mqtt_service_is_registered(hass: HomeAssistant) -> None:
 
     _async_register_services(hass)
     assert hass.services.has_service(DOMAIN, "publish_mqtt")
+
+
+# ---------------------------------------------------------------------------
+# Two config entries must not overwrite each other's retained messages
+# ---------------------------------------------------------------------------
+
+
+async def _loaded_coordinator(hass: HomeAssistant) -> MunskankarnaCoordinator:
+    """A second, independent coordinator with its own config entry."""
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT], CONF_TOP_COUNT: 3})
+
+    async def fake_fetch(self, release_id: str, title: str) -> dict:  # noqa: ANN001
+        return {
+            "release": build_release(release_id, KIND_TILLFALLIGT, "2026-09-11", wine_count=1),
+            "wines": [build_wine(release_id, "Ett Vin")],
+            "warnings": [],
+            "page_valid": True,
+        }
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator,
+            "_async_fetch_index",
+            new=AsyncMock(return_value=[build_release(RELEASE_ID, KIND_TILLFALLIGT, "2026-09-11")]),
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
+    ):
+        coord = MunskankarnaCoordinator(hass, entry)
+        await coord.async_refresh()
+    return coord
+
+
+async def test_two_entries_get_distinct_discovery_and_state_topics(
+    hass: HomeAssistant, mqtt_available
+) -> None:
+    """Retained discovery configs are keyed by topic, so a shared topic loses one.
+
+    Both entries published `homeassistant/sensor/munskankarna_<kind>/config`
+    and `munskankarna/wines/<kind>/state`. The second retained message
+    replaced the first on the broker, so two Home Assistant instances (or two
+    entries pointing at different sites) sharing a broker silently collapsed
+    into a single entity fed by whichever published last.
+    """
+    first = await _loaded_coordinator(hass)
+    second = await _loaded_coordinator(hass)
+    assert first.entry.entry_id != second.entry.entry_id
+
+    async def topics_for(coordinator: MunskankarnaCoordinator) -> list[str]:
+        with patch(
+            "custom_components.munskankarna.mqtt_bridge.mqtt.async_publish", new=AsyncMock()
+        ) as publish:
+            # No explicit topic: the *default* is what must be unique.
+            assert await async_publish_snapshot(hass, coordinator)
+        return [call.args[1] for call in publish.await_args_list]
+
+    first_topics = await topics_for(first)
+    second_topics = await topics_for(second)
+
+    assert first_topics and second_topics
+    overlap = set(first_topics) & set(second_topics)
+    assert not overlap, f"two entries published to the same topics: {sorted(overlap)}"
+
+    # Both kinds of topic must be distinct, not just one of them.
+    assert [t for t in first_topics if t.endswith("/config")]
+    assert [t for t in first_topics if t.endswith("/state")]
+    for topic in first_topics:
+        assert first.entry.entry_id in topic, f"{topic} carries no entry identity"
+
+
+async def test_discovery_unique_id_and_object_id_are_per_entry(
+    hass: HomeAssistant,
+) -> None:
+    """The retained config's own identifiers must not collide either."""
+    first = await _loaded_coordinator(hass)
+    second = await _loaded_coordinator(hass)
+
+    config_a = build_discovery_config(first, KIND_TILLFALLIGT, DEFAULT_MQTT_TOPIC)
+    config_b = build_discovery_config(second, KIND_TILLFALLIGT, DEFAULT_MQTT_TOPIC)
+
+    assert config_a["unique_id"] != config_b["unique_id"]
+    assert config_a["object_id"] != config_b["object_id"], (
+        "a shared object_id makes the two entities fight over one entity_id"
+    )
+
+
+async def test_a_carried_over_release_is_flagged_stale_in_the_payload(
+    hass: HomeAssistant,
+) -> None:
+    """Subscribers outside HA need the same staleness signal the sensor gets.
+
+    A carried-over release is last week's wines republished. That beats
+    blanking the topic, but a consumer must be able to tell the difference.
+    """
+    coordinator = await _loaded_coordinator(hass)
+    assert build_state_payload(coordinator, KIND_TILLFALLIGT)["stale"] is False
+
+    coordinator.data["releases"][KIND_TILLFALLIGT]["stale"] = True
+    assert build_state_payload(coordinator, KIND_TILLFALLIGT)["stale"] is True
+    # Diagnostics and any other as_payload consumer sees it too.
+    assert coordinator.as_payload()["releases"][0]["stale"] is True
