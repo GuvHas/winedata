@@ -321,3 +321,66 @@ def test_manifest_keys_are_sorted_the_way_hassfest_requires() -> None:
     assert keys[:2] == ["domain", "name"], f"first two keys are {keys[:2]}"
     rest = keys[2:]
     assert rest == sorted(rest), f"keys after domain/name are not sorted: {rest}"
+
+
+def _release_workflow() -> dict:
+    """Parse the release workflow.
+
+    PyYAML follows YAML 1.1, where the unquoted key ``on`` is the boolean
+    ``True`` rather than the string ``"on"`` — so look under both.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    return workflow
+
+
+def test_merging_a_version_bump_publishes_the_release() -> None:
+    """A merge to main must publish the Release by itself.
+
+    HACS only offers versions that exist as published Releases. If releasing
+    needed a manual run, a merged version bump would sit in the manifest while
+    users kept being offered the previous version — exactly the state this
+    repository was in when the manifest said 1.0.3 and HACS offered 1.0.2.
+    """
+    workflow = _release_workflow()
+    triggers = workflow.get("on", workflow.get(True))
+    assert triggers is not None, "workflow declares no triggers"
+
+    assert "push" in triggers, "workflow does not run on any push"
+    branches = triggers["push"].get("branches") or []
+    assert "main" in branches, "a merge to main does not trigger the release"
+
+
+def test_the_tag_is_created_for_a_merge_not_only_a_manual_run() -> None:
+    """The tag step must cover the merge path too.
+
+    It was gated on ``workflow_dispatch``, which was correct while that was the
+    only way to release. A push to main has to create the tag as well; the only
+    event that must skip the step is a pushed tag, which already is the ref.
+    """
+    workflow = _release_workflow()
+    steps = workflow["jobs"]["release"]["steps"]
+    tag_steps = [s for s in steps if "tag if it does not exist" in s.get("name", "")]
+    assert tag_steps, "no tag-creation step"
+
+    condition = str(tag_steps[0].get("if", ""))
+    assert "workflow_dispatch" not in condition, (
+        "tag creation is still limited to manual runs, so a merge to main "
+        "would not produce a tag"
+    )
+    assert "refs/tags/" in condition, (
+        "tag creation should be skipped only when the ref already is the tag"
+    )
+
+
+def test_concurrent_merges_cannot_race_to_publish() -> None:
+    """Two merges landing together must not both try to create the tag."""
+    workflow = _release_workflow()
+    assert "concurrency" in workflow, (
+        "no concurrency guard: two pushes to main could race on the same tag"
+    )

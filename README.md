@@ -324,7 +324,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 285 tests
+python -m pytest          # 288 tests
 ruff check custom_components tests
 ```
 
@@ -340,29 +340,29 @@ has a *published GitHub Release*. It decides by calling GitHub's
 `repos.releases.list` API, which returns Release objects only — **a bare git
 tag is not enough**, and drafts and pre-releases are skipped.
 
-So releases are made by workflow, not by hand:
+Releasing is therefore automatic, and the manifest version is the trigger:
 
 1. Bump `version` in `custom_components/munskankarna/manifest.json` (and the
    matching `version` in `pyproject.toml` — a test enforces they agree)
 2. Merge that to `main`
-3. **Actions → Release → Run workflow**
 
-The workflow reads the version from the manifest, creates the matching `vX.Y.Z`
-tag if needed, and publishes a non-draft Release marked latest. HACS then offers
-that version instead of a commit.
+That is the whole procedure. On every push to `main` the Release workflow reads
+the manifest version and asks GitHub whether a Release for it already exists:
 
-Parser tests run against HTML captured from the live site
-(`tests/fixtures/`), and the suite includes a probe replicating Home
-Assistant's own blocking-call detector.
+- **It does** → the run is a no-op, so ordinary merges cost nothing. The run
+  logs a notice reminding you to bump the version if the change should reach
+  users.
+- **It does not** → the `vX.Y.Z` tag is created and a non-draft, non-prerelease
+  Release marked *latest* is published. HACS then offers that version.
 
-## Attribution
+Because the version always comes from the manifest, the tag, the Release and
+the manifest cannot disagree. A pushed `v*` tag that contradicts the manifest
+fails the run rather than publishing a mismatched Release.
 
-Reviews, scores and tasting notes are the work of
-[Munskänkarna](https://www.munskankarna.se/sv/vinlocus/). Prices and article
-numbers refer to [Systembolaget](https://www.systembolaget.se/).
+**Actions → Release → Run workflow** still works, as a recovery path if a run
+fails for an unrelated reason; it is idempotent, as is the whole workflow.
 
-This is an unofficial integration, not affiliated with either organisation. The
-default 6-hour interval and the 0.75 s spacing between requests are deliberate —
-please keep them reasonable.
-
-Licensed under the [MIT License](LICENSE).
+> [!IMPORTANT]
+> Forgetting the version bump is the one way to ship nothing: the code reaches
+> `main` but HACS keeps offering the previous version, since there is no new
+> Release to offer. The notice in the workflow log is there to catch it.

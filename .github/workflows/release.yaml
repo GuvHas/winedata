@@ -4,20 +4,39 @@ name: Release
 # GitHub's releases API (repos.releases.list). That endpoint returns Release
 # objects only — a bare git tag is not enough, and draft or pre-release
 # entries are skipped. So publishing a real Release is what makes HACS offer
-# "1.0.2" instead of a commit SHA.
+# "1.0.3" instead of a commit SHA.
 #
-# Run manually: Actions -> Release -> Run workflow.
-# The version comes from custom_components/munskankarna/manifest.json, so the
-# tag, the Release and the manifest can never disagree.
+# The release is driven by the manifest version, not by a human remembering
+# to run anything:
+#
+#   * Merge to main   -> if manifest.json names a version with no Release yet,
+#                        the tag and the Release are created. If that version
+#                        is already released, the run is a no-op, so ordinary
+#                        merges cost nothing and a version bump is the single
+#                        act that ships a release.
+#   * Pushed v* tag   -> publishes that tag, failing if it contradicts the
+#                        manifest.
+#   * Manual dispatch -> same as a merge; kept as a recovery path.
+#
+# Because the version comes from custom_components/munskankarna/manifest.json,
+# the tag, the Release and the manifest can never disagree.
 
 on:
-  workflow_dispatch:
   push:
+    branches: [main]
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+# Two merges landing close together would otherwise race to create the same
+# tag. Never cancel a run in progress: a half-published release is worse than
+# a queued one.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -35,6 +54,22 @@ jobs:
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "Manifest version: $version"
 
+      - name: Decide whether this version still needs a release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.manifest.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG is already published; nothing to do."
+            echo "::notice::$TAG is already released. If this change should" \
+                 "reach HACS users, bump \"version\" in manifest.json."
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "No Release for $TAG yet; publishing it."
+          fi
+
       - name: Verify the tag matches the manifest
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -45,8 +80,10 @@ jobs:
             exit 1
           fi
 
+      # Skipped only when the ref already is the tag — that is, for a pushed
+      # v* tag. A merge to main and a manual run both have to create it.
       - name: Create the tag if it does not exist
-        if: github.event_name == 'workflow_dispatch'
+        if: ${{ steps.check.outputs.needed == 'true' && !startsWith(github.ref, 'refs/tags/') }}
         env:
           TAG: ${{ steps.manifest.outputs.tag }}
         run: |
@@ -60,15 +97,12 @@ jobs:
           fi
 
       - name: Publish the release
+        if: ${{ steps.check.outputs.needed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.manifest.outputs.tag }}
           VERSION: ${{ steps.manifest.outputs.version }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already published."
-            exit 0
-          fi
           # --latest and no --draft/--prerelease: HACS skips drafts and
           # pre-releases when deciding which versions to offer.
           gh release create "$TAG" \
