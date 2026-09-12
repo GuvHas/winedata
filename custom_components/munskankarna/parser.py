@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import UTC, datetime
-from typing import Any, Final, TypedDict
+from typing import Any, Final, NotRequired, TypedDict
 from urllib.parse import quote_plus, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
@@ -129,6 +129,9 @@ class ParseResult(TypedDict):
     #: False the page was something else entirely — maintenance, a login wall,
     #: a redesign — and its emptiness says nothing about the release.
     page_valid: bool
+    #: Set by the coordinator, not the parser: this result was carried over
+    #: from an earlier poll because the current cycle could not refresh it.
+    stale: NotRequired[bool]
 
 
 # ---------------------------------------------------------------------------
@@ -633,13 +636,11 @@ def _parse_wine_card(
     )
 
 
-#: Markup that identifies a Vinlocus release page, whatever it contains. Used
-#: to tell "this release has no wines this week" apart from "this is not a
-#: release page", which parse to the same empty wine list.
-_RELEASE_PAGE_MARKERS: Final[tuple[str, ...]] = (
-    "#wine-bottles-list",
-    ".c-wine-contentdescription",
-)
+#: The wine list itself. Recognising a release page by an *outer* marker is not
+#: enough: a redesign can keep the page chrome while renaming the cards, and
+#: the page then parses to zero wines and passes as a quiet week. Only the
+#: container the wines actually come from can distinguish the two.
+_WINE_LIST_SELECTOR: Final = "#wine-bottles-list"
 
 
 def parse_release_page(
@@ -680,19 +681,15 @@ def parse_release_page(
         wine_count=0,
     )
 
-    # Whether this is a release page at all, independent of how many wines it
-    # holds. Both markers are specific to Vinlocus release pages: a
-    # maintenance page, a login wall, a JSON error body or a redesigned
-    # template has neither, while a genuinely empty holiday-week release still
-    # renders its container and its description.
-    page_valid = any(
-        soup.select_one(selector) is not None for selector in _RELEASE_PAGE_MARKERS
-    )
+    has_wine_list = soup.select_one(_WINE_LIST_SELECTOR) is not None
 
     # Cards live in `ul#wine-bottles-list`; `li.wine-section` rows are colour
     # headings that apply to the cards following them.
-    items = soup.select("#wine-bottles-list > li")
+    items = soup.select(f"{_WINE_LIST_SELECTOR} > li")
     section_label = ""
+    #: Rows that should have yielded a wine. Counted so that "the list is
+    #: empty" can be told from "the list is full of things we cannot read".
+    card_candidates = 0
 
     for item in items:
         classes = item.get("class") or []
@@ -700,6 +697,7 @@ def parse_release_page(
             section_label = _text_of(item.select_one(".cat-header")) or _text_of(item)
             continue
 
+        card_candidates += 1
         card = item if "c-wine-info" in classes else item.select_one(".c-wine-info")
         if card is None:
             continue
@@ -712,6 +710,11 @@ def parse_release_page(
             continue
         seen.add(wine["id"])
         wines.append(wine)
+
+    # Recognised as a release page only if the wine list is there *and* either
+    # yielded wines or was genuinely empty. A list full of rows none of which
+    # parse is a redesign, not a quiet week, and must not publish a zero.
+    page_valid = has_wine_list and (bool(wines) or card_candidates == 0)
 
     if not wines:
         warnings.append(

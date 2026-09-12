@@ -294,6 +294,10 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
             "release_title": markdown_safe(release["title"]),
             "release_date": release["date"],
             "release_url": release["url"],
+            # True when this cycle could not refresh the release and the
+            # previous result was carried over. Serving last week's wines is
+            # better than blanking the sensor, but it must not be silent.
+            "stale": bool(result.get("stale")),
             "summary": truncate(markdown_safe(release["summary"]), MAX_SUMMARY_LENGTH),
             "wines": [
                 wine_summary(w) for w in self.coordinator.top_wines(self._kind)

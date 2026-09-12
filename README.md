@@ -116,7 +116,7 @@ All entities are grouped under one **Munskänkarna** device.
 
 | Entity | State | Key attributes |
 |---|---|---|
-| `sensor.munskankarna_tillfalligt_sortiment` | wines in the release | `wines`, `release_title`, `release_date`, `release_url`, `summary` |
+| `sensor.munskankarna_tillfalligt_sortiment` | wines in the release | `wines`, `release_title`, `release_date`, `release_url`, `summary`, `stale` |
 | `sensor.munskankarna_fast_sortiment` | wines in the release | same |
 | `sensor.munskankarna_hitlista` | wines in the release | same |
 | `sensor.munskankarna_lokalt_och_smaskaligt` | wines in the release | same |
@@ -125,8 +125,10 @@ All entities are grouped under one **Munskänkarna** device.
 | `sensor.munskankarna_latest_release` | ISO date | `releases` |
 | `sensor.munskankarna_wines_tested` | total wines | `warnings` |
 
-A sensor only exists for a tasting type you have enabled, and goes
-`unavailable` if that particular release fails to load — the others keep working.
+A sensor exists for every tasting type you have enabled. If its release cannot
+be refreshed on a given poll, it keeps the wines from the last successful one
+and sets `stale: true` rather than blanking — it only reads `unavailable` if it
+has never loaded. The other types are unaffected either way.
 
 ### Shape of a `wines` entry
 
@@ -323,9 +325,13 @@ Two things worth knowing:
   reads `unavailable` and starts reporting as soon as a later poll succeeds —
   no reload. Enabling a new type in Options reloads the entry and adds it.
 - A page that cannot be recognised as a release page at all — maintenance, a
-  login wall, a redesign — **fails the update rather than reporting zero
-  wines**, so the last good data stays on the sensor instead of being replaced
-  by an authoritative-looking `0`.
+  login wall, a redesign — **never reports zero wines**. That tasting type
+  keeps its previous wines, flagged `stale: true`; if *nothing* could be
+  refreshed the whole update fails, so every sensor keeps what it had. Either
+  way an authoritative-looking `0` is never published.
+- Recognition requires the wine list itself, not just the surrounding page. A
+  redesign that keeps the chrome but renames the cards is treated as broken,
+  not as a quiet week.
 
 One client with one login serves an entire update cycle, and all I/O is
 non-blocking `httpx` — nothing touches the event loop.
@@ -360,7 +366,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 315 tests
+python -m pytest          # 321 tests
 ruff check custom_components tests
 ```
 

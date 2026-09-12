@@ -86,6 +86,9 @@ def build_state_payload(
         "release_date": release["date"],
         "release_url": release["url"],
         "summary": release["summary"],
+        # A consumer outside Home Assistant needs the same staleness signal the
+        # sensor gets: this may be an earlier poll's wines, republished.
+        "stale": bool(result.get("stale")),
         "generated_at": coordinator.data["last_success"] if coordinator.data else None,
         "wines": [wine_summary(wine) for wine in result["wines"][:cap]],
     }

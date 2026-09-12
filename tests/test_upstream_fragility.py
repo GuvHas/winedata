@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from custom_components.munskankarna.const import (
     CONF_KINDS,
     DOMAIN,
+    KIND_HITLISTAN,
     KIND_TILLFALLIGT,
 )
 from custom_components.munskankarna.coordinator import MunskankarnaCoordinator
@@ -265,3 +266,159 @@ async def test_a_recognised_empty_release_still_updates(hass: HomeAssistant) -> 
     coordinator = entry.runtime_data
     assert coordinator.last_update_success is True
     assert coordinator.data["releases"][KIND_TILLFALLIGT]["release"]["wine_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Review round: a partial failure must not drop the failed kind's data
+# ---------------------------------------------------------------------------
+
+
+DESCRIPTION_BUT_NO_CARD_LIST = """
+<html><body><h1>Tillfälligt sortiment 11 september 2026</h1>
+<div class="c-wine-contentdescription">Om provningen: veckans viner.</div>
+<ul id="wines"><li class="card"><div class="wine">Ett Vin</div></li></ul>
+</body></html>
+"""
+
+CARD_CLASS_RENAMED = """
+<html><body><h1>Tillfälligt sortiment 11 september 2026</h1>
+<div class="c-wine-contentdescription">Om provningen: veckans viner.</div>
+<ul id="wine-bottles-list">
+  <li class="medium-3 groupedlist"><div class="c-wine-card"><h3>
+    <a href="/sv/vinlocus/a/b"><span>Ett Vin</span></a></h3></div></li>
+  <li class="medium-3 groupedlist"><div class="c-wine-card"><h3>
+    <a href="/sv/vinlocus/a/c"><span>Ett Till</span></a></h3></div></li>
+</ul></body></html>
+"""
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        # The outer description survives a redesign that renames the list.
+        DESCRIPTION_BUT_NO_CARD_LIST,
+        # The list survives but every card inside it is unreadable.
+        CARD_CLASS_RENAMED,
+    ],
+)
+def test_a_redesign_that_breaks_the_cards_is_not_an_empty_release(html: str) -> None:
+    """An outer marker is not enough to call zero wines authentic.
+
+    Both of these keep a marker the flag originally trusted while the cards
+    themselves became unreadable, so the page passed as a genuine quiet week
+    and the zero propagated — the exact corruption page_valid exists to stop.
+    """
+    result = parse_release_page(html, release_id="r", title="R")
+    assert result["wines"] == []
+    assert result["page_valid"] is False
+
+
+def test_an_empty_card_list_is_still_an_authentic_empty_release() -> None:
+    """The container present and genuinely empty stays valid."""
+    result = parse_release_page(RECOGNISED_BUT_EMPTY_PAGE, release_id="r", title="R")
+    assert result["page_valid"] is True
+    assert result["wines"] == []
+
+
+async def test_one_broken_kind_does_not_discard_its_cached_wines(
+    hass: HomeAssistant,
+) -> None:
+    """A partial failure replaced the whole snapshot, dropping the failed kind.
+
+    `_async_collect` skipped the broken kind and returned a successful result
+    containing only the others. `DataUpdateCoordinator` replaces `data`
+    wholesale, so the skipped kind's wines vanished and its sensor went
+    unavailable — the same data loss, reached by a different route.
+    """
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN]})
+    broken = {"now": False}
+
+    async def fake_fetch(self, rid: str, title: str) -> dict:  # noqa: ANN001
+        kind = KIND_TILLFALLIGT if rid.startswith("tillfalligt") else KIND_HITLISTAN
+        if broken["now"] and kind == KIND_HITLISTAN:
+            return parse_release_page(MAINTENANCE_PAGE, release_id=rid, title=title)
+        return {
+            "release": build_release(rid, kind, "2026-09-11", wine_count=1),
+            "wines": [build_wine(rid, f"Vin {kind}")],
+            "warnings": [],
+            "page_valid": True,
+        }
+
+    index = [
+        build_release("tillfalligt-x", KIND_TILLFALLIGT, "2026-09-11"),
+        build_release("hitlista-x", KIND_HITLISTAN, "2026-09-03"),
+    ]
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator, "_async_fetch_index", new=AsyncMock(return_value=index)
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+        assert coordinator.data["releases"][KIND_HITLISTAN]["release"]["wine_count"] == 1
+
+        broken["now"] = True
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    # The healthy kind refreshed ...
+    assert coordinator.last_update_success is True
+    assert coordinator.data["releases"][KIND_TILLFALLIGT]["release"]["wine_count"] == 1
+    # ... and the broken one kept what it had, flagged as not freshly confirmed.
+    kept = coordinator.data["releases"].get(KIND_HITLISTAN)
+    assert kept is not None, "the broken kind's cached wines were discarded"
+    assert kept["release"]["wine_count"] == 1
+    assert kept.get("stale") is True
+
+    entity_id = er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{entry.entry_id}_release_{KIND_HITLISTAN}"
+    )
+    state = hass.states.get(entity_id)
+    assert state.state == "1", "the sensor lost its reading on a partial failure"
+    assert state.attributes["stale"] is True
+
+
+async def test_a_kind_skipped_by_a_rate_limit_keeps_its_data(hass: HomeAssistant) -> None:
+    """The 429 `break` leaves later kinds unfetched; they must not be dropped."""
+    from custom_components.munskankarna.api import RateLimited
+
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN]})
+    limited = {"now": False}
+
+    async def fake_fetch(self, rid: str, title: str) -> dict:  # noqa: ANN001
+        kind = KIND_TILLFALLIGT if rid.startswith("tillfalligt") else KIND_HITLISTAN
+        if limited["now"]:
+            raise RateLimited("slow down", retry_after=1800)
+        return {
+            "release": build_release(rid, kind, "2026-09-11", wine_count=1),
+            "wines": [build_wine(rid, f"Vin {kind}")],
+            "warnings": [],
+            "page_valid": True,
+        }
+
+    index = [
+        build_release("tillfalligt-x", KIND_TILLFALLIGT, "2026-09-11"),
+        build_release("hitlista-x", KIND_HITLISTAN, "2026-09-03"),
+    ]
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator, "_async_fetch_index", new=AsyncMock(return_value=index)
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+
+        limited["now"] = True
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    # Nothing loaded this cycle, so the update fails and HA keeps the snapshot.
+    assert coordinator.last_update_success is False
+    for kind in (KIND_TILLFALLIGT, KIND_HITLISTAN):
+        assert coordinator.data["releases"][kind]["release"]["wine_count"] == 1

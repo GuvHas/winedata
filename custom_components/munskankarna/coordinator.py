@@ -265,6 +265,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         releases: dict[str, ParseResult] = {}
         warnings: list[str] = []
+        #: What the previous cycle published, so a kind that cannot be
+        #: refreshed keeps what it had rather than vanishing from the snapshot.
+        previous: dict[str, ParseResult] = (self.data or {}).get("releases", {})
 
         for kind, release in wanted.items():
             try:
@@ -302,14 +305,28 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 )
                 continue
 
+
             result["wines"] = sort_wines(result["wines"])
             warnings.extend(result.get("warnings") or [])
             releases[kind] = result
 
+        # Nothing refreshed this cycle: fail, so Home Assistant keeps the whole
+        # previous snapshot rather than republishing it as if it were current.
         if not releases:
             raise UpdateFailed(
                 "Every configured release failed to load: " + "; ".join(warnings[:3])
             )
+
+        # At least one kind refreshed. Any kind that did not — a fetch error, an
+        # unrecognised page, or one the rate-limit `break` never reached — keeps
+        # its previous result. Without this the returned snapshot replaces the
+        # coordinator's entire data, so a partial failure silently discarded the
+        # failed kind's wines and took its sensor offline.
+        for kind in wanted:
+            if kind in releases:
+                continue
+            if (carried := previous.get(kind)) is not None:
+                releases[kind] = {**carried, "stale": True}
 
         return CoordinatorData(
             releases=releases,
@@ -356,6 +373,8 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     "date": result["release"]["date"],
                     "url": result["release"]["url"],
                     "wine_count": result["release"]["wine_count"],
+                    # Carried over from an earlier poll rather than refreshed.
+                    "stale": bool(result.get("stale")),
                     "wines": result["wines"][:cap],
                 }
                 for kind, result in self.data["releases"].items()

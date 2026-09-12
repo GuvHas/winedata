@@ -270,3 +270,20 @@ async def test_discovery_unique_id_and_object_id_are_per_entry(
     assert config_a["object_id"] != config_b["object_id"], (
         "a shared object_id makes the two entities fight over one entity_id"
     )
+
+
+async def test_a_carried_over_release_is_flagged_stale_in_the_payload(
+    hass: HomeAssistant,
+) -> None:
+    """Subscribers outside HA need the same staleness signal the sensor gets.
+
+    A carried-over release is last week's wines republished. That beats
+    blanking the topic, but a consumer must be able to tell the difference.
+    """
+    coordinator = await _loaded_coordinator(hass)
+    assert build_state_payload(coordinator, KIND_TILLFALLIGT)["stale"] is False
+
+    coordinator.data["releases"][KIND_TILLFALLIGT]["stale"] = True
+    assert build_state_payload(coordinator, KIND_TILLFALLIGT)["stale"] is True
+    # Diagnostics and any other as_payload consumer sees it too.
+    assert coordinator.as_payload()["releases"][0]["stale"] is True
