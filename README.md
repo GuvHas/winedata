@@ -346,6 +346,13 @@ diagnostics from the integration page — credentials are redacted.
 Munskänkarna rejected the stored credentials. The reauth dialog only replaces
 the username and password; your base URL and options are preserved.
 
+**Updates have stopped and the log says "asked us to slow down"**
+Munskänkarna returned HTTP 429 and named a cooldown, which the integration now
+honours — no request is made until it expires, and pressing *Uppdatera nu* will
+not override it. Download diagnostics to see
+`coordinator.rate_limit_cooldown_seconds`. If it recurs, raise the update
+interval in Options; the reviews are published weekly at most.
+
 **"Detected blocking call to load_verify_locations"**
 Fixed in 1.0.1 — update the integration.
 
@@ -353,7 +360,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 310 tests
+python -m pytest          # 315 tests
 ruff check custom_components tests
 ```
 

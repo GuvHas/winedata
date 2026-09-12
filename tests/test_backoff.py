@@ -191,3 +191,132 @@ async def test_a_rate_limit_during_setup_is_shown_as_cannot_connect(hass) -> Non
 
     assert result["type"] is data_entry_flow.FlowResultType.FORM
     assert result["errors"] == {"base": "cannot_connect"}
+
+
+# ---------------------------------------------------------------------------
+# The requested cooldown must actually be honoured
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_429_suppresses_every_request_until_the_cooldown_expires(hass) -> None:
+    """Retry-After was parsed, logged and then thrown away.
+
+    The cycle stopped, but nothing recorded *when* we were allowed back. The
+    next scheduled poll — or an impatient user pressing the refresh button —
+    went straight back to a server that had just asked for an hour of quiet.
+    """
+    from custom_components.munskankarna.const import CONF_KINDS, KIND_TILLFALLIGT
+    from custom_components.munskankarna.coordinator import MunskankarnaCoordinator
+    from tests.helpers import create_entry
+
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT]})
+    index = respx.get(f"{DEFAULT_BASE_URL}/sv/vinlocus/provningstyp").mock(
+        return_value=httpx.Response(429, headers={"Retry-After": "3600"})
+    )
+
+    coordinator = MunskankarnaCoordinator(hass, entry)
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is False
+    assert index.call_count == 1
+
+    # A manual refresh well inside the hour must not reach the network at all.
+    await coordinator.async_refresh()
+
+    assert index.call_count == 1, "requested again during the cooldown"
+    assert respx.calls.call_count == 1, (
+        f"{respx.calls.call_count} HTTP requests were dispatched during the cooldown"
+    )
+    assert coordinator.last_update_success is False
+
+
+@respx.mock
+async def test_the_cooldown_also_suppresses_the_login_request(hass) -> None:
+    """"Including login requests" — the login POST is a request like any other."""
+    from custom_components.munskankarna.const import (
+        CONF_BASE_URL,
+        CONF_KINDS,
+        CONF_PASSWORD,
+        CONF_USERNAME,
+        KIND_TILLFALLIGT,
+    )
+    from custom_components.munskankarna.coordinator import MunskankarnaCoordinator
+    from tests.helpers import create_entry
+
+    entry = create_entry(
+        hass,
+        data={
+            CONF_BASE_URL: DEFAULT_BASE_URL,
+            CONF_USERNAME: "member@example.com",
+            CONF_PASSWORD: "pw",
+        },
+        options={CONF_KINDS: [KIND_TILLFALLIGT]},
+    )
+    # The login flow fetches "/" for its tokens before anything else.
+    login_page = respx.get(DEFAULT_BASE_URL + "/").mock(
+        return_value=httpx.Response(429, headers={"Retry-After": "3600"})
+    )
+
+    coordinator = MunskankarnaCoordinator(hass, entry)
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is False
+    assert login_page.call_count == 1
+
+    await coordinator.async_refresh()
+    assert login_page.call_count == 1, "logged in again during the cooldown"
+    assert respx.calls.call_count == 1
+
+
+@respx.mock
+async def test_the_cooldown_is_reported_rather_than_failing_silently(hass) -> None:
+    """The user must be able to tell a cooldown from a broken integration."""
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    from custom_components.munskankarna.const import CONF_KINDS, KIND_TILLFALLIGT
+    from custom_components.munskankarna.coordinator import MunskankarnaCoordinator
+    from tests.helpers import create_entry
+
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT]})
+    respx.get(f"{DEFAULT_BASE_URL}/sv/vinlocus/provningstyp").mock(
+        return_value=httpx.Response(429, headers={"Retry-After": "3600"})
+    )
+
+    coordinator = MunskankarnaCoordinator(hass, entry)
+    await coordinator.async_refresh()
+
+    with pytest.raises(UpdateFailed, match="[Rr]ate limit"):
+        await coordinator._async_update_data()
+
+
+async def test_a_successful_poll_is_not_blocked_by_a_stale_cooldown(hass) -> None:
+    """A cooldown that has passed must not keep the integration offline."""
+    from unittest.mock import AsyncMock, patch
+
+    from custom_components.munskankarna.const import CONF_KINDS, KIND_TILLFALLIGT
+    from custom_components.munskankarna.coordinator import MunskankarnaCoordinator
+    from tests.helpers import build_release, build_wine, create_entry
+
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT]})
+    coordinator = MunskankarnaCoordinator(hass, entry)
+    # A cooldown that expired an hour ago.
+    coordinator._rate_limited_until = 0.0
+
+    async def fake_fetch(self, release_id: str, title: str):  # noqa: ANN001, ANN202
+        return {
+            "release": build_release(release_id, KIND_TILLFALLIGT, "2026-09-11", wine_count=1),
+            "wines": [build_wine(release_id, "Ett Vin")],
+            "warnings": [],
+            "page_valid": True,
+        }
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator,
+            "_async_fetch_index",
+            new=AsyncMock(return_value=[build_release("r", KIND_TILLFALLIGT, "2026-09-11")]),
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
+    ):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is True

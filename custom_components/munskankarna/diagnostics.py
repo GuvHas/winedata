@@ -30,6 +30,9 @@ async def async_get_config_entry_diagnostics(
             "update_interval": str(coordinator.update_interval),
             "tracked_kinds": coordinator.kinds,
             "top_count": coordinator.top_count,
+            # A rate-limit cooldown is indistinguishable from a broken
+            # integration from the outside: updates simply stop. Say so.
+            "rate_limit_cooldown_seconds": round(coordinator.cooldown_remaining),
         },
         # Bounded on purpose: a diagnostics dump should stay readable.
         "snapshot": coordinator.as_payload(limit=3),
