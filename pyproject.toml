@@ -1,6 +1,6 @@
 [project]
 name = "munskankarna-ha"
-version = "1.0.3"
+version = "1.0.4"
 description = "Home Assistant integration for Munskänkarna wine reviews, matched to Systembolaget"
 readme = "README.md"
 requires-python = ">=3.12"
