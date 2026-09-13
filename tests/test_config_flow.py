@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import voluptuous as vol
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
 
@@ -340,3 +341,40 @@ async def test_reauth_rejects_still_bad_credentials(hass: HomeAssistant) -> None
     assert result["type"] is data_entry_flow.FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_auth"}
     assert entry.data[CONF_PASSWORD] == "stale"
+
+
+async def test_options_flow_configures_the_retention_depth(hass: HomeAssistant) -> None:
+    """How many releases to keep is a user choice, so it belongs in Options."""
+    from custom_components.munskankarna.const import (
+        CONF_HISTORY_COUNT,
+        DEFAULT_HISTORY_COUNT,
+        MAX_HISTORY_COUNT,
+    )
+
+    entry = create_entry(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    schema_keys = {str(key) for key in result["data_schema"].schema}
+    assert CONF_HISTORY_COUNT in schema_keys, "retention depth is not configurable"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_SCAN_INTERVAL_HOURS: 12,
+            CONF_TOP_COUNT: 5,
+            CONF_HISTORY_COUNT: 2,
+            CONF_KINDS: [KIND_TILLFALLIGT],
+        },
+    )
+    assert result["type"] is data_entry_flow.FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_HISTORY_COUNT] == 2
+
+    # The form itself must not offer a depth the coordinator would clamp away.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    with pytest.raises(vol.Invalid):
+        result["data_schema"]({
+            CONF_SCAN_INTERVAL_HOURS: 12,
+            CONF_TOP_COUNT: 5,
+            CONF_HISTORY_COUNT: MAX_HISTORY_COUNT + 1,
+            CONF_KINDS: [KIND_TILLFALLIGT],
+        })
+    assert DEFAULT_HISTORY_COUNT <= MAX_HISTORY_COUNT

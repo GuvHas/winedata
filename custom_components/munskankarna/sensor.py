@@ -73,6 +73,25 @@ def truncate(value: str | None, limit: int) -> str | None:
     return value[: limit - 1].rstrip() + "…"
 
 
+def release_summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Per-release metadata with no wine list.
+
+    Deliberately small: this rides on the per-kind sensors, which were already
+    sized carefully, so retention must not grow them. The wines for every
+    retained release live on the single history sensor instead.
+    """
+    release = result["release"]
+    return {
+        "kind": kind,
+        "release_id": release["id"],
+        "title": markdown_safe(release["title"]),
+        "date": release["date"],
+        "url": release["url"],
+        "wine_count": release["wine_count"],
+        "stale": bool(result.get("stale")),
+    }
+
+
 def wine_summary(wine: WineDict) -> dict[str, Any]:
     """Project a wine onto the fields a dashboard card actually renders.
 
@@ -172,6 +191,40 @@ GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
                 for kind, result in (c.data["releases"].items() if c.data else [])
             ]
         },
+    ),
+    MunskankarnaSensorDescription(
+        key="history",
+        translation_key="history",
+        name="History",
+        icon="mdi:history",
+        native_unit_of_measurement="provningar",
+        # A scalar state; the archive itself is in attributes, as it must be.
+        value_fn=lambda c: len(c.retained_releases()),
+        attributes_fn=lambda c: {
+            "retained_per_kind": c.history_count,
+            "releases": [
+                {
+                    **release_summary(kind, result),
+                    "kind_label": KIND_LABELS.get(kind, kind),
+                    # Capped per release: this one entity carries the whole
+                    # archive, so the cap is what bounds it as retention grows.
+                    "wines": [wine_summary(w) for w in result["wines"][: c.top_count]],
+                }
+                for kind, result in c.retained_releases()
+            ],
+        },
+    ),
+    MunskankarnaSensorDescription(
+        key="fynd_history",
+        translation_key="fynd_history",
+        name="Fynd (retained)",
+        icon="mdi:tag-multiple",
+        native_unit_of_measurement="viner",
+        value_fn=lambda c: sum(c.fynd_in_history().values()),
+        # A count and a per-kind breakdown only. The wines themselves are on
+        # the history sensor; duplicating them here would double the cost of
+        # the one payload worth watching.
+        attributes_fn=lambda c: {"per_kind": c.fynd_in_history()},
     ),
     MunskankarnaSensorDescription(
         key="total_wines",
@@ -301,5 +354,11 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
             "summary": truncate(markdown_safe(release["summary"]), MAX_SUMMARY_LENGTH),
             "wines": [
                 wine_summary(w) for w in self.coordinator.top_wines(self._kind)
+            ],
+            # Summaries only — dates and counts, no wine lists. Retention must
+            # not grow the sensors that were already sized carefully.
+            "history": [
+                release_summary(self._kind, r)
+                for r in self.coordinator.retained(self._kind)
             ],
         }

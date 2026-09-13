@@ -36,6 +36,7 @@ from .const import (
     DOMAIN,
     MAX_HISTORY_COUNT,
     MAX_TOP_COUNT,
+    VALUE_FYND,
     VALUE_ORDER,
 )
 from .parser import ParseResult, ReleaseDict, WineDict
@@ -531,6 +532,37 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for result in self.data["releases"].values():
             wines.extend(result["wines"])
         return sort_wines(wines)
+
+    def retained(self, kind: str) -> list[ParseResult]:
+        """Every retained release for a tasting kind, newest first."""
+        if not self.data:
+            return []
+        return self.data.get("history", {}).get(kind, [])
+
+    def retained_releases(self) -> list[tuple[str, ParseResult]]:
+        """(kind, release) for every retained release, newest first across kinds.
+
+        Flattened here rather than in the sensor: a dashboard reads one list in
+        publication order, which is not the same as "grouped by kind".
+        """
+        if not self.data:
+            return []
+        pairs = [
+            (kind, result)
+            for kind, results in self.data.get("history", {}).items()
+            for result in results
+        ]
+        pairs.sort(key=lambda pair: _release_sort_key(pair[1]["release"]), reverse=True)
+        return pairs
+
+    def fynd_in_history(self) -> dict[str, int]:
+        """How many Fynd each kind published across its retained releases."""
+        counts: dict[str, int] = {}
+        for kind, result in self.retained_releases():
+            counts[kind] = counts.get(kind, 0) + sum(
+                1 for wine in result["wines"] if wine.get("value_rating") == VALUE_FYND
+            )
+        return counts
 
     def as_payload(self, limit: int | None = None) -> dict[str, Any]:
         """A JSON-serialisable snapshot, used by the MQTT bridge and diagnostics."""
