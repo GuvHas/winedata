@@ -38,6 +38,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry)
     """Set up Munskänkarna from a config entry."""
     coordinator = MunskankarnaCoordinator(hass, entry)
 
+    # Before the first poll, so a restart reuses the retained releases instead
+    # of re-reading release pages that cannot have changed.
+    await coordinator.async_load_history()
+
     # Raises ConfigEntryNotReady on failure, so Home Assistant retries with
     # backoff instead of publishing entities full of misleading zeros.
     await coordinator.async_config_entry_first_refresh()
@@ -65,6 +69,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry
             if hass.services.has_service(DOMAIN, service):
                 hass.services.async_remove(DOMAIN, service)
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry) -> None:
+    """Delete the entry's history cache when it is removed.
+
+    Unload leaves it in place on purpose — a reload or a restart should reuse
+    it. Only removing the integration should discard it.
+    """
+    await MunskankarnaCoordinator(hass, entry).async_remove_storage()
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry) -> None:

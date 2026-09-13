@@ -15,6 +15,7 @@ from typing import Any, Final, TypedDict
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.ssl import get_default_context
 
@@ -51,6 +52,18 @@ _DEFAULT_COOLDOWN: Final = 900.0
 #: Ceiling on an honoured Retry-After. A misconfigured or hostile header could
 #: otherwise park the integration for days with no way back but a reload.
 _MAX_COOLDOWN: Final = 6 * 3600.0
+
+#: Schema version of the on-disk history cache.
+STORAGE_VERSION: Final = 1
+
+
+def history_storage_key(entry_id: str) -> str:
+    """Where one config entry's retained releases live under `.storage`.
+
+    Per entry, so two entries pointing at different sites cannot share or
+    overwrite a cache — the same reasoning that scopes the MQTT topics.
+    """
+    return f"{DOMAIN}.history_{entry_id}"
 
 
 
@@ -168,6 +181,14 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         #: 429's Retry-After. Monotonic rather than wall clock so a system
         #: clock change cannot extend or cancel it.
         self._rate_limited_until: float = 0.0
+        #: The retained releases, persisted outside the recorder. `.storage` is
+        #: a document cache: no recorder rows, no websocket traffic, and a
+        #: restart does not re-read a dozen unchanged release pages.
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, history_storage_key(entry.entry_id)
+        )
+        #: History read back from disk, used until the first cycle replaces it.
+        self._restored_history: dict[str, list[ParseResult]] = {}
         hours = entry.options.get(CONF_SCAN_INTERVAL_HOURS)
         interval = timedelta(hours=hours) if hours else DEFAULT_SCAN_INTERVAL
 
@@ -234,6 +255,50 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self.entry.data.get(CONF_PASSWORD),
             verify=get_default_context(),
         )
+
+    # -- persisted history -------------------------------------------------
+
+    async def async_load_history(self) -> None:
+        """Restore the retained releases from disk before the first poll.
+
+        A cache is an optimisation, never a dependency: anything unreadable or
+        the wrong shape is discarded and the cycle simply refetches.
+        """
+        try:
+            stored = await self._store.async_load()
+        except Exception:  # noqa: BLE001 - a bad cache must never block setup
+            _LOGGER.warning("Could not read the stored history; starting empty",
+                            exc_info=True)
+            return
+
+        history = (stored or {}).get("history")
+        if not isinstance(history, dict):
+            if history is not None:
+                _LOGGER.warning("Stored history had an unexpected shape; ignoring it")
+            return
+
+        restored = {
+            kind: releases
+            for kind, releases in history.items()
+            if isinstance(releases, list) and releases
+        }
+        self._restored_history = restored
+        if restored:
+            _LOGGER.debug(
+                "Restored %d retained release(s) from storage",
+                sum(len(v) for v in restored.values()),
+            )
+
+    async def _async_save_history(self, history: dict[str, list[ParseResult]]) -> None:
+        """Persist the retained releases. Never fatal to an update."""
+        try:
+            await self._store.async_save({"history": history})
+        except Exception:  # noqa: BLE001 - failing to cache is not failing to update
+            _LOGGER.warning("Could not persist the history cache", exc_info=True)
+
+    async def async_remove_storage(self) -> None:
+        """Delete the cache when the config entry is removed."""
+        await self._store.async_remove()
 
     # -- rate-limit cooldown -----------------------------------------------
 
@@ -336,7 +401,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         #: What the previous cycle published, so a kind that cannot be
         #: refreshed keeps what it had rather than vanishing from the snapshot.
         previous: dict[str, ParseResult] = (self.data or {}).get("releases", {})
-        previous_history: dict[str, list[ParseResult]] = (self.data or {}).get("history", {})
+        previous_history: dict[str, list[ParseResult]] = (
+            (self.data or {}).get("history") or self._restored_history
+        )
 
         rate_limited = False
 
@@ -431,6 +498,8 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 releases[kind] = {**carried, "stale": True}
             if kind not in history and (carried_history := previous_history.get(kind)):
                 history[kind] = carried_history
+
+        await self._async_save_history(history)
 
         return CoordinatorData(
             releases=releases,
