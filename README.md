@@ -2,7 +2,7 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-41BDF5.svg)](https://www.home-assistant.io/)
-[![Version](https://img.shields.io/badge/version-1.0.4-blue.svg)](https://github.com/GuvHas/winedata/releases)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/GuvHas/winedata/releases)
 
 Weekly wine reviews from **Munskänkarna**, Sweden's wine society, matched to
 **Systembolaget's** catalog — on your dashboard, and available to automations.
@@ -31,6 +31,7 @@ a bargain is one tap from the Systembolaget page.
 - [Automations](#automations)
 - [Services](#services)
 - [MQTT bridge](#mqtt-bridge-optional)
+- [Release history](#release-history)
 - [How it stays current](#how-it-stays-current)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -45,6 +46,8 @@ a bargain is one tap from the Systembolaget page.
 - Every wine carries its **Systembolaget article number and product URL**
 - Releases roll over automatically — next week's tasting appears with no
   reconfiguration and the same `entity_id`
+- **Keeps the last few releases per tasting type**, so a dashboard can show
+  several weeks at once
 - Optional MQTT bridge for consumers outside Home Assistant
 - Full UI setup, English and Swedish, diagnostics with credentials redacted
 
@@ -98,6 +101,7 @@ immediately rather than leaving you with empty sensors.
 |---|---:|---|
 | Update interval (hours) | 6 | Reviews appear weekly at most |
 | Wines per sensor | 10 | See the note below |
+| Releases kept per tasting type | 3 | See *Release history* below |
 | Tastings to track | 4 types | Webbviner excluded by default |
 
 **Webbviner are excluded by default** — those wines are sold by independent web
@@ -129,6 +133,8 @@ All entities are grouped under one **Munskänkarna** device.
 | `sensor.munskankarna_fynd` | number of *Fynd* | `wines` |
 | `sensor.munskankarna_latest_release` | ISO date | `releases` |
 | `sensor.munskankarna_wines_tested` | total wines | `warnings` |
+| `sensor.munskankarna_history` | releases retained | `releases` — the whole archive, wines included |
+| `sensor.munskankarna_fynd_history` | *Fynd* across the archive | `per_kind` |
 
 A sensor exists for every tasting type you have enabled. If its release cannot
 be refreshed on a given poll, it keeps the wines from the last successful one
@@ -312,6 +318,52 @@ discovery config and the two would collapse into one entity.
 > be re-created under a new id. Clear the stale ones by publishing an empty
 > retained payload to `homeassistant/sensor/munskankarna_<kind>/config`.
 
+## Release history
+
+The integration retains the **last few releases per tasting type**, not just the
+current one, so a dashboard can show several weeks side by side. The depth is
+set in Options and defaults to three.
+
+Retention is **count-based, not age-based**, and that is deliberate. The
+categories publish on very different cadences:
+
+| Tasting type | Publishes roughly | 3 releases ≈ |
+|---|---|---|
+| Tillfälligt sortiment | every 7 days | 3 weeks |
+| Hitlistan | every 14 days | 6 weeks |
+| Lokalt och småskaligt | every 28–35 days | 3 months |
+| Fast sortiment | every 30–60 days | 3–6 months |
+
+A fixed 21-day window would hold three or four releases of *Tillfälligt
+sortiment* and **nothing at all** for the others through most of each month —
+two of the four tracked by default would simply read zero. Counting releases
+instead means every category keeps its current release plus real history; the
+trade-off is that "three releases" reaches back further for the slower ones.
+
+> [!NOTE]
+> The archive lives in `.storage`, **not the recorder**. It costs no database
+> rows and no websocket traffic, and it survives a restart — so Home Assistant
+> restarting does not re-read release pages that cannot have changed. Published
+> release pages are treated as immutable: only the current release of each type
+> is re-read on each poll.
+
+The whole archive, wines included, is carried by the single
+`sensor.munskankarna_history` entity. The per-type sensors get only a compact
+`history` summary — dates and counts, no wine lists — so they stay exactly the
+size they were. If you would rather the archive never reached the recorder:
+
+```yaml
+recorder:
+  exclude:
+    entities:
+      - sensor.munskankarna_history
+```
+
+A ready-made dashboard for it is in
+[`dashboard/3-week-history.yaml`](dashboard/3-week-history.yaml): a timeline and
+best-of overview, every retained release week by week, and all *Fynd* across the
+window sorted best-first. Stock cards only.
+
 ## How it stays current
 
 Every update cycle the integration re-reads Munskänkarna's release index and
@@ -371,7 +423,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 321 tests
+python -m pytest          # 353 tests
 ruff check custom_components tests
 ```
 
