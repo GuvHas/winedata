@@ -1,0 +1,308 @@
+# Munskänkarna — retained releases
+#
+# A second dashboard for the release archive the integration now keeps. Paste
+# into Settings -> Dashboards -> + -> ⋮ -> Raw configuration editor.
+#
+# Everything here reads ONE entity, `sensor.munskankarna_history`. That is
+# deliberate: the whole archive is carried by a single sensor so the per-kind
+# sensors stay small, and so you can exclude just this one from the recorder
+# if you want to:
+#
+#     recorder:
+#       exclude:
+#         entities:
+#           - sensor.munskankarna_history
+#
+# Built from stock cards only — no HACS frontend plugins required. Two
+# optional upgrades are noted at the bottom.
+#
+# Every optional field is guarded with `is not none`. That is not decoration:
+# a markdown card that raises renders as a red error box, so one wine with no
+# price would take out the whole table rather than its own row.
+
+views:
+  # =======================================================================
+  # OVERVIEW — what is in the archive right now.
+  # =======================================================================
+  - title: Överblick
+    path: overblick
+    icon: mdi:history
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Arkivet
+            heading_style: title
+
+          - type: glance
+            show_name: true
+            show_state: true
+            entities:
+              - entity: sensor.munskankarna_history
+                name: Släpp sparade
+              - entity: sensor.munskankarna_fynd_history
+                name: Fynd totalt
+              - entity: sensor.munskankarna_wines_tested
+                name: Viner denna vecka
+
+          # A compact timeline: one line per retained release, newest first.
+          - type: markdown
+            content: >-
+              {% set s = 'sensor.munskankarna_history' %}
+
+              {% set releases = state_attr(s,'releases') or [] %}
+
+              {% if releases %}
+
+              ## Tidslinje
+
+              | Datum | Provning | Viner | Bästa betyg |
+
+              |---|---|---:|---:|
+
+              {% for r in releases -%}
+
+              {% set best = r.wines | map(attribute='score') | select('ne', None)
+              | list %}| {{ r.date or '—' }} | {{ r.kind_label }} |
+              {{ r.wine_count }} | {% if best %}**{{ best | max }}**{% else
+              %}—{% endif %} |
+
+              {% endfor %}
+
+              _{{ releases | length }} släpp sparade ·
+              {{ state_attr(s,'retained_per_kind') }} per provningstyp_
+
+              {% else %}
+
+              _Inget arkiv ännu. Det fylls på vid nästa uppdatering._
+
+              {% endif %}
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Veckans bästa
+            heading_style: title
+            icon: mdi:trophy
+
+          # The single best wine across everything retained.
+          - type: markdown
+            content: >-
+              {% set releases = state_attr('sensor.munskankarna_history','releases')
+              or [] %}
+
+              {% set ns = namespace(best=none, when=none, kind=none) %}
+
+              {% for r in releases %}{% for w in r.wines %}{% if w.score is not
+              none and (ns.best is none or w.score > ns.best.score) %}{% set
+              ns.best = w %}{% set ns.when = r.date %}{% set ns.kind =
+              r.kind_label %}{% endif %}{% endfor %}{% endfor %}
+
+              {% if ns.best %}
+
+              ## 🏆 {{ ns.best.name }}
+
+              **{{ ns.best.score }}/20** · {{ ns.best.producer or '—' }} ·
+              {% if ns.best.price is not none %}{{ ns.best.price | round(0) }}
+              kr{% else %}—{% endif %}
+
+              _{{ ns.kind }} · {{ ns.when or '—' }}_
+
+              {% if ns.best.url %}[Öppna på Systembolaget]({{ ns.best.url }}){%
+              endif %}
+
+              {% else %}
+
+              _Inga betygsatta viner i arkivet ännu._
+
+              {% endif %}
+
+  # =======================================================================
+  # WEEK BY WEEK — the archive in publication order.
+  # =======================================================================
+  - title: Vecka för vecka
+    path: veckor
+    icon: mdi:calendar-week
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Alla sparade släpp
+            heading_style: title
+
+          - type: markdown
+            content: >-
+              {% set releases = state_attr('sensor.munskankarna_history','releases')
+              or [] %}
+
+              {% if releases %}
+
+              {% for r in releases %}
+
+              ### {{ r.kind_label }} · {{ r.date or 'utan datum' }}
+
+              {% if r.stale %}_⚠️ Kunde inte uppdateras senast — visar tidigare
+              hämtning._{% endif %}
+
+              {% if r.wines %}
+
+              | Betyg | Vin | Pris | |
+
+              |---:|---|---:|---|
+
+              {% for w in r.wines -%}
+
+              | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
+              %}** | {{ w.name }}{% if w.vintage %} {{ w.vintage }}{% endif %}{%
+              if w.value == 'fynd' %} ⭐{% endif %}<br><sub>{{ w.producer or '—'
+              }}</sub> | {% if w.price is not none %}{{ w.price | round(0) }}
+              kr{% else %}—{% endif %} | {% if w.url %}[🔗]({{ w.url }}){% endif
+              %} |
+
+              {% endfor %}
+
+              _{{ r.wine_count }} viner i släppet_
+
+              {% else %}
+
+              _Inga viner i det här släppet._
+
+              {% endif %}
+
+              {% endfor %}
+
+              {% else %}
+
+              _Inget arkiv ännu._
+
+              {% endif %}
+
+  # =======================================================================
+  # FYND — bargains across the whole retained window, best first.
+  # =======================================================================
+  - title: Fynd
+    path: fynd
+    icon: mdi:tag-heart
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Fynd i hela arkivet
+            heading_style: title
+            icon: mdi:tag-heart
+
+          - type: markdown
+            content: >-
+              {% set releases = state_attr('sensor.munskankarna_history','releases')
+              or [] %}
+
+              {% set ns = namespace(rows=[]) %}
+
+              {% for r in releases %}{% for w in r.wines %}{% if w.value ==
+              'fynd' %}{% set ns.rows = ns.rows + [dict(w, when=r.date,
+              kind=r.kind_label)] %}{% endif %}{% endfor %}{% endfor %}
+
+              {% set rows = ns.rows | sort(attribute='score', reverse=true) %}
+
+              {% if rows %}
+
+              | Betyg | Vin | Provning | Datum | Pris | |
+
+              |---:|---|---|---|---:|---|
+
+              {% for w in rows -%}
+
+              | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
+              %}** | {{ w.name }}<br><sub>{{ w.producer or '—' }}</sub> |
+              {{ w.kind }} | {{ w.when or '—' }} | {% if w.price is not none %}{{
+              w.price | round(0) }} kr{% else %}—{% endif %} | {% if w.url
+              %}[🔗]({{ w.url }}){% endif %} |
+
+              {% endfor %}
+
+              _{{ rows | length }} fynd i arkivet_
+
+              {% else %}
+
+              _Inga fynd i arkivet ännu._
+
+              {% endif %}
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Fynd per provningstyp
+            heading_style: title
+
+          - type: markdown
+            content: >-
+              {% set per = state_attr('sensor.munskankarna_fynd_history','per_kind')
+              or {} %}
+
+              {% if per %}
+
+              | Provningstyp | Fynd |
+
+              |---|---:|
+
+              {% for kind, count in per.items() -%}
+
+              | {{ kind }} | **{{ count }}** |
+
+              {% endfor %}
+
+              {% else %}
+
+              _Ingen statistik ännu._
+
+              {% endif %}
+
+          - type: markdown
+            content: >-
+              {% set n = states('sensor.munskankarna_history') %}
+
+              _Arkivet sparar de senaste släppen per provningstyp. Provningarna
+              publiceras olika ofta — Tillfälligt sortiment varje vecka,
+              Hitlistan varannan, Fast sortiment och Lokalt och småskaligt
+              ungefär en gång i månaden — så tre släpp betyder ungefär tre
+              veckor för den första och snarare tre månader för de andra.
+              Ändra djupet under Inställningar -> Enheter och tjänster ->
+              Munskänkarna -> Konfigurera._
+
+# ==========================================================================
+# OPTIONAL: HACS frontend cards
+# ==========================================================================
+#
+# Both are genuine upgrades here, and both are optional — the dashboard above
+# is complete without them.
+#
+# flex-table-card renders an attribute list as a real sortable table, which
+# suits the Fynd view better than Markdown can:
+#
+#   - type: custom:flex-table-card
+#     title: Fynd i arkivet
+#     entities:
+#       include: sensor.munskankarna_history
+#     sort_by: score-
+#     columns:
+#       - name: Betyg
+#         data: releases
+#         modify: x.wines
+#       - name: Vin
+#         data: releases
+#
+# auto-entities can build a filtered card set per tasting type without
+# hand-writing one section each:
+#
+#   - type: custom:auto-entities
+#     card:
+#       type: entities
+#     filter:
+#       include:
+#         - entity_id: sensor.munskankarna_*

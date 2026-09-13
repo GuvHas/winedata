@@ -277,3 +277,26 @@ async def test_missing_values_render_as_an_em_dash(
     output = Template(source, hass).async_render(parse_result=False)
     assert "Ofullständigt Vin" in output, "the card dropped the wine entirely"
     assert "—" in output, "a missing price/score/producer left no visible placeholder"
+
+
+async def test_markdown_tables_render_as_tables(
+    hass: HomeAssistant, configured, dashboard: dict
+) -> None:
+    """A blank line between rows splits a table into loose paragraphs.
+
+    Easy to introduce in a folded YAML scalar — a `{% set %}` on its own line
+    becomes a blank line in the output — and invisible to a test that only
+    asserts the template rendered without raising.
+    """
+    for source in _templates(dashboard):
+        lines = Template(source, hass).async_render(parse_result=False).splitlines()
+        for i in range(len(lines) - 2):
+            if (
+                lines[i].lstrip().startswith("|")
+                and not lines[i + 1].strip()
+                and lines[i + 2].lstrip().startswith("|")
+            ):
+                raise AssertionError(
+                    "blank line between table rows breaks the table:\n"
+                    + "\n".join(lines[max(0, i - 1) : i + 3])
+                )

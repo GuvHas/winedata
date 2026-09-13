@@ -217,7 +217,10 @@ GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
     MunskankarnaSensorDescription(
         key="fynd_history",
         translation_key="fynd_history",
-        name="Fynd (retained)",
+        # Named so the entity_id is sensor.munskankarna_fynd_history, matching
+        # the key. "Fynd (retained)" slugged to ..._fynd_retained, which the
+        # shipped dashboard then silently failed to read.
+        name="Fynd history",
         icon="mdi:tag-multiple",
         native_unit_of_measurement="viner",
         value_fn=lambda c: sum(c.fynd_in_history().values()),
