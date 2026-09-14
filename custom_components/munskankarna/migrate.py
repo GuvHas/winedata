@@ -14,6 +14,14 @@ The whole risk is overriding an id the *user* chose, so the migration only
 touches an id that is exactly what Home Assistant would have auto-derived when
 the entity was registered. A hand-picked id never matches that, and neither
 does an id another integration already owns.
+
+That guarantee costs coverage, deliberately. The legacy id is recognised by
+re-deriving it from the device's *current* name, and Home Assistant keeps no
+record of a device's previous names — so an entity left on
+`sensor.virtual_munskankarna_history` by a device since renamed again is
+indistinguishable from an id a person picked, and is left alone. The README
+documents that case and the manual fix; guessing at it is the one thing worse
+than leaving it.
 """
 
 from __future__ import annotations
@@ -40,16 +48,17 @@ def canonical_object_id(name: str) -> str:
     return slugify(f"{DEFAULT_NAME} {name}")
 
 
-def _derived_object_ids(entry: er.RegistryEntry, device_name: str) -> set[str]:
-    """Every object_id Home Assistant itself could have derived for `entry`.
+def _derived_object_id(entry: er.RegistryEntry, device_name: str) -> str:
+    """The one object_id Home Assistant itself could have derived for `entry`.
 
-    With `has_entity_name` the object_id is the device name plus the entity
-    name; without it, the entity name alone. Both are listed because an
-    install may predate the switch, and neither can collide with a
-    deliberately chosen id.
+    Every sensor this integration has ever registered set `has_entity_name`,
+    from the commit that introduced the platform onwards, so Home Assistant
+    always prefixed the device name. A bare `sensor.history` was therefore
+    never produced by any released version — only by a person — and treating
+    it as auto-derived would rewrite a deliberate id while covering no install
+    that exists.
     """
-    name = entry.original_name or ""
-    return {slugify(f"{device_name} {name}"), slugify(name)}
+    return slugify(f"{device_name} {entry.original_name or ''}")
 
 
 @callback
@@ -69,7 +78,7 @@ def async_migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
         device = devices.async_get(existing.device_id) if existing.device_id else None
         device_name = (device.name_by_user or device.name or "") if device else ""
-        if current not in _derived_object_ids(existing, device_name):
+        if current != _derived_object_id(existing, device_name):
             # Home Assistant would never have produced this id, so a person
             # did. Their choice outranks the dashboard's convenience.
             continue

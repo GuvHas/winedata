@@ -149,6 +149,37 @@ async def test_an_id_the_user_chose_is_left_alone(hass: HomeAssistant) -> None:
     assert "sensor.munskankarna_history" not in ids
 
 
+async def test_a_bare_name_id_is_left_alone(hass: HomeAssistant) -> None:
+    """`sensor.history` can only have been chosen by a person.
+
+    The integration has set `has_entity_name` since the commit that introduced
+    the sensor platform, so no released version ever registered an id without
+    the device name in front of it. Treating a bare entity name as
+    auto-derived would therefore rewrite an id somebody picked deliberately,
+    while covering no install that actually exists.
+    """
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN]})
+    devices = dr.async_get(hass)
+    device = devices.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Munskänkarna",
+    )
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "sensor", DOMAIN, f"{entry.entry_id}_history",
+        suggested_object_id="history",
+        config_entry=entry, device_id=device.id,
+        original_name="History", has_entity_name=True,
+    )
+
+    await _run_setup(hass, entry)
+
+    ids = {e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)}
+    assert "sensor.history" in ids, "a deliberately chosen bare-name id was renamed"
+    assert "sensor.munskankarna_history" not in ids
+
+
 async def test_a_taken_canonical_id_is_not_stolen(hass: HomeAssistant) -> None:
     """Never rename onto an id something else already holds."""
     entry, registry = _legacy_install(hass, "Virtual Munskänkarna", "virtual_munskankarna")
