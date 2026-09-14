@@ -412,7 +412,9 @@ lists **uniformly** until it fits, publishing what it did:
 | `truncated` | `true` when that is fewer than your *Wines per sensor* option |
 
 Every release always keeps its date, wine count and link — only the wine lists
-shrink, so the timeline never lies about what was published. With the four
+shrink, so the timeline never lies about what was published. **The dashboard
+says when it is showing a trimmed list**, and the *Fynd* card reconciles what
+it can list against the true total on `sensor.munskankarna_fynd_history`. With the four
 default types, three releases each, expect around three wines per release; to
 see more of each, track fewer tasting types or reduce the retention depth.
 
@@ -496,7 +498,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 371 tests
+python -m pytest          # 375 tests
 ruff check custom_components tests
 ```
 

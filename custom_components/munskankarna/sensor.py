@@ -12,6 +12,7 @@ Entity design is shaped by two Home Assistant constraints:
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
@@ -34,11 +35,15 @@ from .const import (
     DOMAIN,
     KIND_LABELS,
     MANUFACTURER,
+    MAX_ATTRIBUTE_BYTES,
     MAX_SUMMARY_LENGTH,
+    MAX_TITLE_LENGTH,
     VALUE_FYND,
 )
 from .coordinator import MunskankarnaCoordinator
 from .parser import WineDict
+
+_LOGGER = logging.getLogger(__name__)
 
 #: Characters that are structural in a Lovelace markdown card. The shipped
 #: dashboard interpolates these fields into table cells and link labels, so a
@@ -132,7 +137,14 @@ def largest_fitting(
             low = mid
         else:
             high = mid - 1
-    return low, build(low)
+
+    payload = build(low)
+    if _attribute_bytes(payload) > ATTRIBUTE_BUDGET:
+        # Zero items is not automatically small enough: whatever surrounds the
+        # list may exceed the budget on its own. Report that rather than
+        # returning a payload the recorder will reject.
+        return -1, payload
+    return low, payload
 
 
 def history_wine(wine: WineDict) -> dict[str, Any]:
@@ -170,7 +182,7 @@ def release_summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": kind,
         "release_id": release["id"],
-        "title": markdown_safe(release["title"]),
+        "title": truncate(markdown_safe(release["title"]), MAX_TITLE_LENGTH),
         "date": release["date"],
         "url": release["url"],
         "wine_count": release["wine_count"],
@@ -235,6 +247,37 @@ def _latest_release_date(coordinator: MunskankarnaCoordinator) -> str | None:
     return max(dates) if dates else None
 
 
+def _latest_release_attributes(
+    coordinator: MunskankarnaCoordinator,
+) -> dict[str, Any]:
+    """One row per currently loaded release.
+
+    Small in normal use, but the title is scraped and was carried verbatim:
+    seven tasting types with long enough headings measured 41 kB, over the
+    recorder's limit on their own. Bounded and budgeted like the rest.
+    """
+    items = list(coordinator.data["releases"].items()) if coordinator.data else []
+
+    def build(count: int) -> dict[str, Any]:
+        return {
+            "releases": [
+                {
+                    "kind": kind,
+                    "title": truncate(
+                        markdown_safe(result["release"]["title"]), MAX_TITLE_LENGTH
+                    ),
+                    "date": result["release"]["date"],
+                    "wine_count": result["release"]["wine_count"],
+                    "url": result["release"]["url"],
+                }
+                for kind, result in items[:count]
+            ]
+        }
+
+    shown, payload = largest_fitting(build, len(items))
+    return payload if shown >= 0 else {"releases": []}
+
+
 def _history_attributes(coordinator: MunskankarnaCoordinator) -> dict[str, Any]:
     """The archive, trimmed to fit the recorder's attribute limit.
 
@@ -264,8 +307,48 @@ def _history_attributes(coordinator: MunskankarnaCoordinator) -> dict[str, Any]:
             ],
         }
 
-    _, payload = largest_fitting(build, ceiling)
-    return payload
+    cap, payload = largest_fitting(build, ceiling)
+    if cap >= 0:
+        return payload
+
+    # Even with no wines the payload is too large — enough retained releases
+    # with long titles do it. Drop releases, oldest first, until the timeline
+    # itself fits, and say how many are missing rather than silently showing a
+    # short list.
+    def metadata_only(count: int) -> dict[str, Any]:
+        return {
+            "retained_per_kind": coordinator.history_count,
+            "wines_per_release": 0,
+            "truncated": True,
+            "releases_omitted": len(pairs) - count,
+            "releases": [
+                {
+                    **release_summary(kind, result),
+                    "kind_label": KIND_LABELS.get(kind, kind),
+                    "wines": [],
+                }
+                for kind, result in pairs[:count]
+            ],
+        }
+
+    shown, payload = largest_fitting(metadata_only, len(pairs))
+    if shown >= 0:
+        return payload
+
+    # A single release still will not fit. Nothing useful can be published in
+    # attributes; the archive itself is intact in .storage.
+    _LOGGER.warning(
+        "The retained archive cannot be published in attributes within Home "
+        "Assistant's %d byte limit; the history sensor will carry counts only",
+        MAX_ATTRIBUTE_BYTES,
+    )
+    return {
+        "retained_per_kind": coordinator.history_count,
+        "wines_per_release": 0,
+        "truncated": True,
+        "releases_omitted": len(pairs),
+        "releases": [],
+    }
 
 
 GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
@@ -298,18 +381,7 @@ GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
         name="Latest release",
         icon="mdi:calendar-star",
         value_fn=_latest_release_date,
-        attributes_fn=lambda c: {
-            "releases": [
-                {
-                    "kind": kind,
-                    "title": result["release"]["title"],
-                    "date": result["release"]["date"],
-                    "wine_count": result["release"]["wine_count"],
-                    "url": result["release"]["url"],
-                }
-                for kind, result in (c.data["releases"].items() if c.data else [])
-            ]
-        },
+        attributes_fn=lambda c: _latest_release_attributes(c),
     ),
     MunskankarnaSensorDescription(
         key="history",
@@ -495,5 +567,19 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
         # the recorder's 16 kB limit before retention added the history
         # summaries — close enough that one long wine name breached it. Trim
         # rather than trust the arithmetic.
-        _, payload = largest_fitting(build, len(wines))
-        return payload
+        cap, payload = largest_fitting(build, len(wines))
+        if cap >= 0:
+            return payload
+        # Even with no wines this is too large — an over-long release title or
+        # summary. Publish the identity of the release and nothing else.
+        return {
+            "kind": self._kind,
+            "kind_label": KIND_LABELS.get(self._kind, self._kind),
+            "release_id": release["id"],
+            "release_date": release["date"],
+            "stale": bool(result.get("stale")),
+            "wines_shown": 0,
+            "truncated": True,
+            "wines": [],
+            "history": [],
+        }

@@ -54,6 +54,12 @@ MAX_SUMMARY_LENGTH: Final = 280
 #: homeassistant/components/recorder/db_schema.py, and a test pins the two
 #: together. Mirrored rather than imported because the recorder may not be
 #: loaded at all, and a sensor platform should not depend on it.
+#: Cap on a release title in attributes. The parser takes it straight from the
+#: page's <h1> without bounding it, so enough retained releases with long
+#: enough titles push the payload past the recorder's limit with every wine
+#: already removed. Bounding it is the cheaper half of that fix.
+MAX_TITLE_LENGTH: Final = 120
+
 MAX_ATTRIBUTE_BYTES: Final = 16384
 
 #: How much of that an integration may actually spend. Home Assistant injects

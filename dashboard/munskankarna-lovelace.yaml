@@ -352,6 +352,16 @@ views:
               _{{ releases | length }} släpp ·
               {{ state_attr(s,'retained_per_kind') }} sparas per provningstyp_
 
+              {% if state_attr(s,'truncated') %}
+
+              _⚠️ Visar de {{ state_attr(s,'wines_per_release') }} bästa vinerna
+              per släpp. Home Assistant tillåter högst 16 KiB attribut per
+              entitet, så listorna kortas för att få plats — hela arkivet finns
+              kvar i integrationen. Spåra färre provningstyper eller spara färre
+              släpp för att se fler per släpp._
+
+              {% endif %}
+
               {% else %}
 
               _Inget arkiv ännu. Det fylls på vid nästa uppdatering._
@@ -483,6 +493,14 @@ views:
 
               {% endfor %}
 
+              {% if state_attr('sensor.munskankarna_history','truncated') %}
+
+              _Rankat bland de {{
+              state_attr('sensor.munskankarna_history','wines_per_release') }}
+              bästa vinerna per släpp, inte hela arkivet._
+
+              {% endif %}
+
               {% else %}
 
               _Inget arkiv ännu._
@@ -528,7 +546,20 @@ views:
 
               {% endfor %}
 
+              {% set total = states('sensor.munskankarna_fynd_history') | int(0) %}
+
+              {% if rows | length < total %}
+
+              _Visar {{ rows | length }} av {{ total }} fynd i arkivet. Resten
+              ligger utanför de {{
+              state_attr('sensor.munskankarna_history','wines_per_release') }}
+              viner per släpp som får plats i attributen (16 KiB)._
+
+              {% else %}
+
               _{{ rows | length }} fynd i arkivet_
+
+              {% endif %}
 
               {% else %}
 

@@ -519,3 +519,109 @@ async def test_every_card_degrades_before_the_first_poll(
     for source in _templates(dashboard):
         output = Template(source, hass).async_render(parse_result=False)
         assert "None" not in output
+
+
+# ---------------------------------------------------------------------------
+# Review round: trimmed archives must say so
+# ---------------------------------------------------------------------------
+
+
+async def _setup_truncating(hass: HomeAssistant):
+    """Enough retained wine to force the byte budget to trim."""
+    from custom_components.munskankarna.const import (
+        CONF_HISTORY_COUNT,
+        MAX_HISTORY_COUNT,
+        MAX_TOP_COUNT,
+    )
+
+    entry = create_entry(
+        hass,
+        options={
+            CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN],
+            CONF_TOP_COUNT: MAX_TOP_COUNT,
+            CONF_HISTORY_COUNT: MAX_HISTORY_COUNT,
+        },
+    )
+    index = [
+        build_release(f"{kind}-{w}", kind, f"2026-09-{11 - w:02d}")
+        for kind in (KIND_TILLFALLIGT, KIND_HITLISTAN)
+        for w in range(MAX_HISTORY_COUNT)
+    ]
+
+    async def fake_fetch(self, release_id: str, title: str) -> dict:  # noqa: ANN001
+        kind = release_id.rsplit("-", 1)[0]
+        wines = [
+            build_wine(release_id, f"Château Réserve Spéciale {i}", 17.0 - i / 10,
+                       value="fynd" if i % 2 == 0 else "prisvart", price=99.0 + i)
+            for i in range(40)
+        ]
+        return {
+            "release": build_release(release_id, kind, "2026-09-11",
+                                     wine_count=len(wines)),
+            "wines": wines,
+            "warnings": [],
+            "page_valid": True,
+        }
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator, "_async_fetch_index",
+            new=AsyncMock(return_value=index)
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    return entry
+
+
+async def test_a_trimmed_archive_discloses_it(
+    hass: HomeAssistant, dashboard: dict
+) -> None:
+    """Presenting a trimmed ranking as complete is the failure to avoid.
+
+    When the byte budget lowers the per-release cap, the archive and
+    highlights views are showing a subset. Saying nothing turns a deliberate,
+    documented trade-off into a silent lie about the data.
+    """
+    await _setup_truncating(hass)
+    state = hass.states.get("sensor.munskankarna_history")
+    assert state.attributes["truncated"] is True, "fixture did not trigger trimming"
+
+    output = "".join(
+        Template(source, hass).async_render(parse_result=False)
+        for source in _templates(dashboard)
+    )
+    shown = state.attributes["wines_per_release"]
+    # A distinctive phrase, not a bare number: "3" and "16" occur all over a
+    # page of dates and prices, so a substring check on those proves nothing.
+    assert "Visar de" in output, "the archive never discloses that it is trimmed"
+    assert f"Visar de {shown} bästa" in output, (
+        f"the disclosure does not state the actual cap of {shown}"
+    )
+    assert "16 KiB" in output, "nothing explains why the list is short"
+
+
+async def test_the_two_fynd_counts_are_reconciled(
+    hass: HomeAssistant, dashboard: dict
+) -> None:
+    """Two numbers on one dashboard must not silently disagree.
+
+    `sensor.munskankarna_fynd_history` counts every bargain in the retained
+    data, while the Fynd table can only list the rows that survived trimming.
+    Left alone, the badge says 40 and the table lists 7 with no explanation.
+    """
+    await _setup_truncating(hass)
+    total = int(hass.states.get("sensor.munskankarna_fynd_history").state)
+
+    view = next(v for v in dashboard["views"] if v.get("path") == "hojdpunkter")
+    output = "".join(
+        Template(source, hass).async_render(parse_result=False)
+        for source in _templates(view)
+    )
+
+    listed = output.count("🔗")
+    assert listed < total, "fixture did not produce a gap between the two counts"
+    assert f"av {total}" in output, (
+        f"the Fynd card lists {listed} rows but never says {total} exist"
+    )
