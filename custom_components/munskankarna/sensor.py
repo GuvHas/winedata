@@ -41,6 +41,7 @@ from .const import (
     VALUE_FYND,
 )
 from .coordinator import MunskankarnaCoordinator
+from .migrate import canonical_object_id
 from .parser import WineDict
 
 _LOGGER = logging.getLogger(__name__)
@@ -106,7 +107,7 @@ def canonical_entity_id(hass: HomeAssistant, name: str) -> str:
     existing entity id.
     """
     return async_generate_entity_id(
-        ENTITY_ID_FORMAT, f"{DEFAULT_NAME} {name}", hass=hass
+        ENTITY_ID_FORMAT, canonical_object_id(name), hass=hass
     )
 
 
