@@ -168,14 +168,51 @@ verdict, then price.
 
 ## Dashboard examples
 
-A complete two-view dashboard is in
-[`dashboard/munskankarna-lovelace.yaml`](dashboard/munskankarna-lovelace.yaml)
-(**Settings → Dashboards → + → ⋮ → Raw configuration editor**). It uses only
-built-in cards — no HACS frontend plugins.
+A complete four-view dashboard is in
+[`dashboard/munskankarna-lovelace.yaml`](dashboard/munskankarna-lovelace.yaml).
+
+| View | For | Shows |
+|---|---|---|
+| **Veckans viner** | phone | This week's picks, one tap to Systembolaget |
+| **Alla provningar** | desktop | Full detail per tasting type, current release |
+| **Arkiv** | both | Every retained release, grouped by publication date |
+| **Höjdpunkter** | both | Best wines and every *Fynd* across the whole window |
+
+### Installing it
+
+1. **Settings → Dashboards → + Add Dashboard → New dashboard from scratch**
+2. Open it, then the **pencil** (top right) **→ ⋮ → Raw configuration editor**
+3. Select all, paste the file over it, **Save**
+
+> [!WARNING]
+> Pasting replaces a dashboard's *entire* configuration. Start a new dashboard
+> unless you mean to overwrite an existing one.
+
+The entity ids assume a single config entry and default naming — check yours
+under **Developer Tools → States** (filter on `munskankarna`). A second config
+entry gets `_2`-suffixed ids.
+
+### Requirements
+
+| | |
+|---|---|
+| Home Assistant | 2024.12+ (for the `sections` view type) |
+| Integration | 1.1.0+ for the **Arkiv** and **Höjdpunkter** views — they read `sensor.munskankarna_history` |
+| HACS frontend cards | **None.** Every card in the active config ships with Home Assistant |
+
+Two optional HACS cards (`flex-table-card`, `auto-entities`) are sketched,
+commented out, at the bottom of the file. They improve the archive views and
+the dashboard is complete without them.
+
+Responsiveness comes from the `sections` view type: `max_columns` is an upper
+bound and sections reflow to one column on a phone. The mobile-leaning views
+keep their tables to three or four columns so they stay readable at that width.
 
 Every optional field is guarded with `is not none`. That is not decoration: a
 markdown card that raises renders as a red error box, so one wine with no price
-would take out the whole table rather than its own row.
+would take out the whole table rather than its own row. Anything sorted carries
+an explicit rank for the same reason — Jinja's `sort()` raises comparing `None`
+to a number, and sorting happens before any display guard can help.
 
 Two highlights:
 
@@ -359,10 +396,10 @@ recorder:
       - sensor.munskankarna_history
 ```
 
-A ready-made dashboard for it is in
-[`dashboard/3-week-history.yaml`](dashboard/3-week-history.yaml): a timeline and
-best-of overview, every retained release week by week, and all *Fynd* across the
-window sorted best-first. Stock cards only.
+The **Arkiv** and **Höjdpunkter** views of
+[the dashboard](dashboard/munskankarna-lovelace.yaml) are built on it: every
+retained release grouped by publication date, and the best wines and all *Fynd*
+across the whole window. Stock cards only.
 
 ## How it stays current
 
@@ -423,7 +460,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 353 tests
+python -m pytest          # 358 tests
 ruff check custom_components tests
 ```
 

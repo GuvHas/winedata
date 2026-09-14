@@ -227,7 +227,14 @@ GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
         # A count and a per-kind breakdown only. The wines themselves are on
         # the history sensor; duplicating them here would double the cost of
         # the one payload worth watching.
-        attributes_fn=lambda c: {"per_kind": c.fynd_in_history()},
+        #
+        # `per_kind` stays keyed by slug — that is the stable identifier an
+        # automation should match on — and the display labels ride alongside,
+        # so a card can show "Tillfälligt sortiment" rather than the slug.
+        attributes_fn=lambda c: {
+            "per_kind": (counts := c.fynd_in_history()),
+            "kind_labels": {kind: KIND_LABELS.get(kind, kind) for kind in counts},
+        },
     ),
     MunskankarnaSensorDescription(
         key="total_wines",
