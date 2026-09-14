@@ -11,27 +11,39 @@ Entity design is shaped by two Home Assistant constraints:
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    ENTITY_ID_FORMAT,
+    SensorEntity,
+    SensorEntityDescription,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import async_generate_entity_id
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MunskankarnaConfigEntry
 from .const import (
+    ATTRIBUTE_BUDGET,
     DEFAULT_NAME,
     DOMAIN,
     KIND_LABELS,
     MANUFACTURER,
+    MAX_ATTRIBUTE_BYTES,
     MAX_SUMMARY_LENGTH,
+    MAX_TITLE_LENGTH,
     VALUE_FYND,
 )
 from .coordinator import MunskankarnaCoordinator
 from .parser import WineDict
+
+_LOGGER = logging.getLogger(__name__)
 
 #: Characters that are structural in a Lovelace markdown card. The shipped
 #: dashboard interpolates these fields into table cells and link labels, so a
@@ -73,6 +85,92 @@ def truncate(value: str | None, limit: int) -> str | None:
     return value[: limit - 1].rstrip() + "…"
 
 
+def canonical_entity_id(hass: HomeAssistant, name: str) -> str:
+    """The entity_id this entity would get under the integration's own name.
+
+    Home Assistant derives an entity_id from `device.name_by_user or
+    device.name` plus the entity name, so renaming the device in the UI
+    changes the ids of every entity registered *afterwards* — while entities
+    registered before it keep the old ones. An instance then ends up with both
+    `sensor.munskankarna_hitlista` and `sensor.virtual_munskankarna_history`,
+    and the shipped dashboard points at entities that do not exist.
+
+    Pinning the id here keeps it stable whatever the device is called. The
+    *display* name still follows the device, so a rename is still visible in
+    the UI — only the identifier that automations and dashboards depend on is
+    held still. Collisions are handled by async_generate_entity_id, so a
+    second config entry gets a suffixed id rather than stealing the first's.
+
+    The name passed in is the entity's own name, so the result matches exactly
+    what Home Assistant produces on an unrenamed install — this changes no
+    existing entity id.
+    """
+    return async_generate_entity_id(
+        ENTITY_ID_FORMAT, f"{DEFAULT_NAME} {name}", hass=hass
+    )
+
+
+def _attribute_bytes(payload: dict[str, Any]) -> int:
+    """Payload size as the recorder measures it."""
+    return len(json.dumps(payload, ensure_ascii=False, default=str).encode())
+
+
+def largest_fitting(
+    build: Callable[[int], dict[str, Any]], most: int
+) -> tuple[int, dict[str, Any]]:
+    """The biggest item count whose payload still fits `ATTRIBUTE_BUDGET`.
+
+    Binary search rather than a descending scan: payload size grows
+    monotonically with the count, so ~5 serialisations settle it instead of up
+    to `most`.
+
+    Trimming is what keeps the integration inside the recorder's limit for
+    *every* reachable combination of options, not just the shipped defaults.
+    """
+    if (payload := build(most)) and _attribute_bytes(payload) <= ATTRIBUTE_BUDGET:
+        return most, payload
+
+    low, high = 0, most
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _attribute_bytes(build(mid)) <= ATTRIBUTE_BUDGET:
+            low = mid
+        else:
+            high = mid - 1
+
+    payload = build(low)
+    if _attribute_bytes(payload) > ATTRIBUTE_BUDGET:
+        # Zero items is not automatically small enough: whatever surrounds the
+        # list may exceed the budget on its own. Report that rather than
+        # returning a payload the recorder will reject.
+        return -1, payload
+    return low, payload
+
+
+def history_wine(wine: WineDict) -> dict[str, Any]:
+    """A wine as the archive carries it: only what a history card renders.
+
+    Deliberately leaner than `wine_summary` — 8 fields rather than 17, and
+    about 240 bytes rather than 587. The archive holds every retained release
+    of every tracked type, so per-wine cost is multiplied by two orders of
+    magnitude more wines than the current-release sensors carry.
+
+    `url` collapses the product link and the review link into one field: a
+    card wants "where do I click", and carrying both doubled the largest
+    single field for no gain.
+    """
+    return {
+        "name": markdown_safe(wine.get("name")),
+        "vintage": wine.get("vintage"),
+        "producer": markdown_safe(wine.get("producer")),
+        "score": wine.get("score"),
+        "value": wine.get("value_rating"),
+        "price": wine.get("price_sek"),
+        "price_per_litre": wine.get("price_per_litre"),
+        "url": wine.get("product_url") or wine.get("review_url"),
+    }
+
+
 def release_summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
     """Per-release metadata with no wine list.
 
@@ -84,7 +182,7 @@ def release_summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": kind,
         "release_id": release["id"],
-        "title": markdown_safe(release["title"]),
+        "title": truncate(markdown_safe(release["title"]), MAX_TITLE_LENGTH),
         "date": release["date"],
         "url": release["url"],
         "wine_count": release["wine_count"],
@@ -149,6 +247,110 @@ def _latest_release_date(coordinator: MunskankarnaCoordinator) -> str | None:
     return max(dates) if dates else None
 
 
+def _latest_release_attributes(
+    coordinator: MunskankarnaCoordinator,
+) -> dict[str, Any]:
+    """One row per currently loaded release.
+
+    Small in normal use, but the title is scraped and was carried verbatim:
+    seven tasting types with long enough headings measured 41 kB, over the
+    recorder's limit on their own. Bounded and budgeted like the rest.
+    """
+    items = list(coordinator.data["releases"].items()) if coordinator.data else []
+
+    def build(count: int) -> dict[str, Any]:
+        return {
+            "releases": [
+                {
+                    "kind": kind,
+                    "title": truncate(
+                        markdown_safe(result["release"]["title"]), MAX_TITLE_LENGTH
+                    ),
+                    "date": result["release"]["date"],
+                    "wine_count": result["release"]["wine_count"],
+                    "url": result["release"]["url"],
+                }
+                for kind, result in items[:count]
+            ]
+        }
+
+    shown, payload = largest_fitting(build, len(items))
+    return payload if shown >= 0 else {"releases": []}
+
+
+def _history_attributes(coordinator: MunskankarnaCoordinator) -> dict[str, Any]:
+    """The archive, trimmed to fit the recorder's attribute limit.
+
+    Every retained release keeps its metadata whatever happens — dates, counts
+    and links are the timeline, and dropping a week would make the archive lie
+    about what was published. Only the wine lists are trimmed, uniformly, so
+    the depth is the same for every week and can be stated in one number.
+
+    `wines_per_release` and `truncated` publish that decision rather than
+    hiding it: silent truncation is the failure this whole design avoids.
+    """
+    pairs = coordinator.retained_releases()
+    ceiling = coordinator.top_count
+
+    def build(cap: int) -> dict[str, Any]:
+        return {
+            "retained_per_kind": coordinator.history_count,
+            "wines_per_release": cap,
+            "truncated": cap < ceiling,
+            "releases": [
+                {
+                    **release_summary(kind, result),
+                    "kind_label": KIND_LABELS.get(kind, kind),
+                    "wines": [history_wine(w) for w in result["wines"][:cap]],
+                }
+                for kind, result in pairs
+            ],
+        }
+
+    cap, payload = largest_fitting(build, ceiling)
+    if cap >= 0:
+        return payload
+
+    # Even with no wines the payload is too large — enough retained releases
+    # with long titles do it. Drop releases, oldest first, until the timeline
+    # itself fits, and say how many are missing rather than silently showing a
+    # short list.
+    def metadata_only(count: int) -> dict[str, Any]:
+        return {
+            "retained_per_kind": coordinator.history_count,
+            "wines_per_release": 0,
+            "truncated": True,
+            "releases_omitted": len(pairs) - count,
+            "releases": [
+                {
+                    **release_summary(kind, result),
+                    "kind_label": KIND_LABELS.get(kind, kind),
+                    "wines": [],
+                }
+                for kind, result in pairs[:count]
+            ],
+        }
+
+    shown, payload = largest_fitting(metadata_only, len(pairs))
+    if shown >= 0:
+        return payload
+
+    # A single release still will not fit. Nothing useful can be published in
+    # attributes; the archive itself is intact in .storage.
+    _LOGGER.warning(
+        "The retained archive cannot be published in attributes within Home "
+        "Assistant's %d byte limit; the history sensor will carry counts only",
+        MAX_ATTRIBUTE_BYTES,
+    )
+    return {
+        "retained_per_kind": coordinator.history_count,
+        "wines_per_release": 0,
+        "truncated": True,
+        "releases_omitted": len(pairs),
+        "releases": [],
+    }
+
+
 GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
     MunskankarnaSensorDescription(
         key="top_pick",
@@ -179,18 +381,7 @@ GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
         name="Latest release",
         icon="mdi:calendar-star",
         value_fn=_latest_release_date,
-        attributes_fn=lambda c: {
-            "releases": [
-                {
-                    "kind": kind,
-                    "title": result["release"]["title"],
-                    "date": result["release"]["date"],
-                    "wine_count": result["release"]["wine_count"],
-                    "url": result["release"]["url"],
-                }
-                for kind, result in (c.data["releases"].items() if c.data else [])
-            ]
-        },
+        attributes_fn=lambda c: _latest_release_attributes(c),
     ),
     MunskankarnaSensorDescription(
         key="history",
@@ -200,19 +391,7 @@ GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
         native_unit_of_measurement="provningar",
         # A scalar state; the archive itself is in attributes, as it must be.
         value_fn=lambda c: len(c.retained_releases()),
-        attributes_fn=lambda c: {
-            "retained_per_kind": c.history_count,
-            "releases": [
-                {
-                    **release_summary(kind, result),
-                    "kind_label": KIND_LABELS.get(kind, kind),
-                    # Capped per release: this one entity carries the whole
-                    # archive, so the cap is what bounds it as retention grows.
-                    "wines": [wine_summary(w) for w in result["wines"][: c.top_count]],
-                }
-                for kind, result in c.retained_releases()
-            ],
-        },
+        attributes_fn=lambda c: _history_attributes(c),
     ),
     MunskankarnaSensorDescription(
         key="fynd_history",
@@ -309,6 +488,8 @@ class MunskankarnaGlobalSensor(MunskankarnaEntity):
         super().__init__(coordinator, entry)
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        # Pinned so a renamed device cannot change it; see canonical_entity_id.
+        self.entity_id = canonical_entity_id(coordinator.hass, description.name)
 
     @property
     def native_value(self) -> Any:
@@ -332,6 +513,10 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
         self._kind = kind
         self._attr_unique_id = f"{entry.entry_id}_release_{kind}"
         self._attr_name = KIND_LABELS.get(kind, kind)
+        # Pinned on the label, not the kind slug: the label is what Home
+        # Assistant already derived these ids from, so existing entities keep
+        # the ids they have (`hitlista`, not `hitlistan`).
+        self.entity_id = canonical_entity_id(coordinator.hass, self._attr_name)
 
     @property
     def available(self) -> bool:
@@ -350,25 +535,51 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
         if result is None:
             return {}
         release = result["release"]
+        wines = self.coordinator.top_wines(self._kind)
+
+        def build(cap: int) -> dict[str, Any]:
+            return {
+                "kind": self._kind,
+                "kind_label": KIND_LABELS.get(self._kind, self._kind),
+                "release_id": release["id"],
+                "release_title": markdown_safe(release["title"]),
+                "release_date": release["date"],
+                "release_url": release["url"],
+                # True when this cycle could not refresh the release and the
+                # previous result was carried over. Serving last week's wines
+                # is better than blanking the sensor, but it must not be silent.
+                "stale": bool(result.get("stale")),
+                "summary": truncate(
+                    markdown_safe(release["summary"]), MAX_SUMMARY_LENGTH
+                ),
+                "wines_shown": cap,
+                "truncated": cap < len(wines),
+                "wines": [wine_summary(w) for w in wines[:cap]],
+                # Summaries only — dates and counts, no wine lists. Retention
+                # must not grow the sensors that were already sized carefully.
+                "history": [
+                    release_summary(self._kind, r)
+                    for r in self.coordinator.retained(self._kind)
+                ],
+            }
+
+        # At the option ceiling of 25 wines this payload measured 15.8 kB of
+        # the recorder's 16 kB limit before retention added the history
+        # summaries — close enough that one long wine name breached it. Trim
+        # rather than trust the arithmetic.
+        cap, payload = largest_fitting(build, len(wines))
+        if cap >= 0:
+            return payload
+        # Even with no wines this is too large — an over-long release title or
+        # summary. Publish the identity of the release and nothing else.
         return {
             "kind": self._kind,
             "kind_label": KIND_LABELS.get(self._kind, self._kind),
             "release_id": release["id"],
-            "release_title": markdown_safe(release["title"]),
             "release_date": release["date"],
-            "release_url": release["url"],
-            # True when this cycle could not refresh the release and the
-            # previous result was carried over. Serving last week's wines is
-            # better than blanking the sensor, but it must not be silent.
             "stale": bool(result.get("stale")),
-            "summary": truncate(markdown_safe(release["summary"]), MAX_SUMMARY_LENGTH),
-            "wines": [
-                wine_summary(w) for w in self.coordinator.top_wines(self._kind)
-            ],
-            # Summaries only — dates and counts, no wine lists. Retention must
-            # not grow the sensors that were already sized carefully.
-            "history": [
-                release_summary(self._kind, r)
-                for r in self.coordinator.retained(self._kind)
-            ],
+            "wines_shown": 0,
+            "truncated": True,
+            "wines": [],
+            "history": [],
         }

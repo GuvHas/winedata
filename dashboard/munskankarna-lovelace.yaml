@@ -74,6 +74,18 @@
 # * Anything sorted carries an explicit `rank` (the score, or -1 when absent).
 #   Jinja's sort() raises comparing None to a number, and sorting happens
 #   before any display guard can help.
+#
+# * Wines in the *archive* views carry a leaner set of fields than wines in
+#   the current-release views: name, vintage, producer, score, value, price,
+#   price_per_litre and url. `url` is already the product link falling back to
+#   the review page, so there is no `review_url` to check there. The archive
+#   spans every retained release of every tracked type, and the full field set
+#   put it over Home Assistant's 16 KiB recorder limit.
+#
+# * The history sensor publishes `wines_per_release` and `truncated`. When the
+#   archive is too large for one attribute payload, the wine lists are trimmed
+#   uniformly and those two attributes say so — every release always keeps its
+#   date, count and link.
 
 views:
   # =======================================================================
@@ -340,6 +352,16 @@ views:
               _{{ releases | length }} släpp ·
               {{ state_attr(s,'retained_per_kind') }} sparas per provningstyp_
 
+              {% if state_attr(s,'truncated') %}
+
+              _⚠️ Visar de {{ state_attr(s,'wines_per_release') }} bästa vinerna
+              per släpp. Home Assistant tillåter högst 16 KiB attribut per
+              entitet, så listorna kortas för att få plats — hela arkivet finns
+              kvar i integrationen. Spåra färre provningstyper eller spara färre
+              släpp för att se fler per släpp._
+
+              {% endif %}
+
               {% else %}
 
               _Inget arkiv ännu. Det fylls på vid nästa uppdatering._
@@ -387,8 +409,7 @@ views:
               | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
               %}** | {{ w.name }}{% if w.value == 'fynd' %} ⭐{% endif %} | {% if
               w.price is not none %}{{ w.price | round(0) }} kr{% else %}—{%
-              endif %} | {% if w.url or w.review_url %}[🔗]({{ w.url or
-              w.review_url }}){% endif %} |
+              endif %} | {% if w.url %}[🔗]({{ w.url }}){% endif %} |
 
               {% endfor %}
 
@@ -467,10 +488,18 @@ views:
               %}** | {{ w.name }}{% if w.value == 'fynd' %} ⭐{% endif
               %}<br><sub>{{ w.producer or '—' }}</sub> | {{ w.kind }} |
               {{ w.when or '—' }} | {% if w.price is not none %}{{ w.price |
-              round(0) }} kr{% else %}—{% endif %} | {% if w.url or w.review_url
-              %}[🔗]({{ w.url or w.review_url }}){% endif %} |
+              round(0) }} kr{% else %}—{% endif %} | {% if w.url %}[🔗]({{
+              w.url }}){% endif %} |
 
               {% endfor %}
+
+              {% if state_attr('sensor.munskankarna_history','truncated') %}
+
+              _Rankat bland de {{
+              state_attr('sensor.munskankarna_history','wines_per_release') }}
+              bästa vinerna per släpp, inte hela arkivet._
+
+              {% endif %}
 
               {% else %}
 
@@ -513,12 +542,24 @@ views:
               }} | {% if w.price is not none %}{{ w.price | round(0) }} kr{%
               else %}—{% endif %} | {% if w.price_per_litre is not none %}{{
               w.price_per_litre | round(0) }}{% else %}—{% endif %} | {% if
-              w.url or w.review_url %}[🔗]({{ w.url or w.review_url }}){% endif
-              %} |
+              w.url %}[🔗]({{ w.url }}){% endif %} |
 
               {% endfor %}
 
+              {% set total = states('sensor.munskankarna_fynd_history') | int(0) %}
+
+              {% if rows | length < total %}
+
+              _Visar {{ rows | length }} av {{ total }} fynd i arkivet. Resten
+              ligger utanför de {{
+              state_attr('sensor.munskankarna_history','wines_per_release') }}
+              viner per släpp som får plats i attributen (16 KiB)._
+
+              {% else %}
+
               _{{ rows | length }} fynd i arkivet_
+
+              {% endif %}
 
               {% else %}
 

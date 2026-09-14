@@ -2,7 +2,7 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-41BDF5.svg)](https://www.home-assistant.io/)
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/GuvHas/winedata/releases)
+[![Version](https://img.shields.io/badge/version-1.1.1-blue.svg)](https://github.com/GuvHas/winedata/releases)
 
 Weekly wine reviews from **Munskänkarna**, Sweden's wine society, matched to
 **Systembolaget's** catalog — on your dashboard, and available to automations.
@@ -135,6 +135,18 @@ All entities are grouped under one **Munskänkarna** device.
 | `sensor.munskankarna_wines_tested` | total wines | `warnings` |
 | `sensor.munskankarna_history` | releases retained | `releases` — the whole archive, wines included |
 | `sensor.munskankarna_fynd_history` | *Fynd* across the archive | `per_kind` |
+
+Entity ids are pinned to the integration's own name, so renaming the device in
+the UI changes what you *see* without changing the ids your dashboards and
+automations depend on.
+
+> [!NOTE]
+> Entities created **before** 1.1.1 kept whatever id Home Assistant derived at
+> the time. If you renamed the device and then upgraded, you may have a mix —
+> `sensor.munskankarna_hitlista` alongside `sensor.virtual_munskankarna_history`.
+> Home Assistant never renames an existing entity, so fix those under
+> **Settings → Devices & Services → Entities**: open the entity, change its ID
+> to the `sensor.munskankarna_…` form, and the shipped dashboard will match.
 
 A sensor exists for every tasting type you have enabled. If its release cannot
 be refreshed on a given poll, it keeps the wines from the last successful one
@@ -384,6 +396,32 @@ trade-off is that "three releases" reaches back further for the slower ones.
 > release pages are treated as immutable: only the current release of each type
 > is re-read on each poll.
 
+### Why the archive sometimes shows fewer wines than you configured
+
+Home Assistant's recorder refuses to store a state whose attributes exceed
+**16 KiB**, dropping them with a warning — the entity keeps working while its
+history is silently lost. The archive spans every retained release of every
+tracked type, so it can outgrow that on its own.
+
+`sensor.munskankarna_history` therefore measures its payload and trims the wine
+lists **uniformly** until it fits, publishing what it did:
+
+| Attribute | Meaning |
+|---|---|
+| `wines_per_release` | How many wines each retained release is showing |
+| `truncated` | `true` when that is fewer than your *Wines per sensor* option |
+
+Every release always keeps its date, wine count and link — only the wine lists
+shrink, so the timeline never lies about what was published. **The dashboard
+says when it is showing a trimmed list**, and the *Fynd* card reconciles what
+it can list against the true total on `sensor.munskankarna_fynd_history`. With the four
+default types, three releases each, expect around three wines per release; to
+see more of each, track fewer tasting types or reduce the retention depth.
+
+Wines in the archive also carry a leaner field set than the current-release
+sensors — name, vintage, producer, score, value, price, price/litre and one
+`url` — which is roughly 240 bytes each rather than 590.
+
 The whole archive, wines included, is carried by the single
 `sensor.munskankarna_history` entity. The per-type sensors get only a compact
 `history` summary — dates and counts, no wine lists — so they stay exactly the
@@ -460,7 +498,7 @@ Fixed in 1.0.1 — update the integration.
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest          # 358 tests
+python -m pytest          # 375 tests
 ruff check custom_components tests
 ```
 
