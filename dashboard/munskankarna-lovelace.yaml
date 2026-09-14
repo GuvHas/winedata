@@ -14,7 +14,10 @@
 #
 #   Home Assistant  2024.12 or newer (the `sections` view type)
 #   Integration     Munskänkarna 1.1.0 or newer, for the archive views —
-#                   they read sensor.munskankarna_history, added in 1.1.0
+#                   they read sensor.munskankarna_history, added in 1.1.0.
+#                   1.1.2 or newer if Home Assistant calls these entities
+#                   unknown: it renames ids left prefixed by a renamed device
+#                   (sensor.virtual_munskankarna_...) back to the ids below.
 #   HACS frontend   NONE. Every card in the active configuration below is
 #                   built into Home Assistant: markdown, glance, entities,
 #                   heading, button. Nothing to install.

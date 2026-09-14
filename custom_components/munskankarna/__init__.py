@@ -16,6 +16,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN, SERVICE_PUBLISH_MQTT, SERVICE_TRIGGER_SYNC
 from .coordinator import MunskankarnaCoordinator
+from .migrate import async_migrate_entity_ids
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +37,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: MunskankarnaConfigEntry) -> bool:
     """Set up Munskänkarna from a config entry."""
+    # Before the platforms register anything: Home Assistant keeps the id an
+    # entity already has, so a repair has to happen while none are loaded.
+    async_migrate_entity_ids(hass, entry)
+
     coordinator = MunskankarnaCoordinator(hass, entry)
 
     # Before the first poll, so a restart reuses the retained releases instead
