@@ -16,9 +16,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    ENTITY_ID_FORMAT,
+    SensorEntity,
+    SensorEntityDescription,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import async_generate_entity_id
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -73,6 +78,31 @@ def truncate(value: str | None, limit: int) -> str | None:
     if value is None or len(value) <= limit:
         return value
     return value[: limit - 1].rstrip() + "…"
+
+
+def canonical_entity_id(hass: HomeAssistant, name: str) -> str:
+    """The entity_id this entity would get under the integration's own name.
+
+    Home Assistant derives an entity_id from `device.name_by_user or
+    device.name` plus the entity name, so renaming the device in the UI
+    changes the ids of every entity registered *afterwards* — while entities
+    registered before it keep the old ones. An instance then ends up with both
+    `sensor.munskankarna_hitlista` and `sensor.virtual_munskankarna_history`,
+    and the shipped dashboard points at entities that do not exist.
+
+    Pinning the id here keeps it stable whatever the device is called. The
+    *display* name still follows the device, so a rename is still visible in
+    the UI — only the identifier that automations and dashboards depend on is
+    held still. Collisions are handled by async_generate_entity_id, so a
+    second config entry gets a suffixed id rather than stealing the first's.
+
+    The name passed in is the entity's own name, so the result matches exactly
+    what Home Assistant produces on an unrenamed install — this changes no
+    existing entity id.
+    """
+    return async_generate_entity_id(
+        ENTITY_ID_FORMAT, f"{DEFAULT_NAME} {name}", hass=hass
+    )
 
 
 def _attribute_bytes(payload: dict[str, Any]) -> int:
@@ -386,6 +416,8 @@ class MunskankarnaGlobalSensor(MunskankarnaEntity):
         super().__init__(coordinator, entry)
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        # Pinned so a renamed device cannot change it; see canonical_entity_id.
+        self.entity_id = canonical_entity_id(coordinator.hass, description.name)
 
     @property
     def native_value(self) -> Any:
@@ -409,6 +441,10 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
         self._kind = kind
         self._attr_unique_id = f"{entry.entry_id}_release_{kind}"
         self._attr_name = KIND_LABELS.get(kind, kind)
+        # Pinned on the label, not the kind slug: the label is what Home
+        # Assistant already derived these ids from, so existing entities keep
+        # the ids they have (`hitlista`, not `hitlistan`).
+        self.entity_id = canonical_entity_id(coordinator.hass, self._attr_name)
 
     @property
     def available(self) -> bool:
