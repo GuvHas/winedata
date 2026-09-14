@@ -51,10 +51,17 @@ def coordinator(hass: HomeAssistant) -> MunskankarnaCoordinator:
     return MunskankarnaCoordinator(hass, entry)
 
 
-async def test_selects_only_the_newest_release_per_kind(
+async def test_the_current_release_is_the_newest_and_unconfigured_kinds_are_skipped(
     hass: HomeAssistant, coordinator: MunskankarnaCoordinator
 ) -> None:
-    """One sensor per tasting type tracks the current release, not the archive."""
+    """`releases[kind]` is the current release; `history` holds the older ones.
+
+    This used to assert that *only* the newest release was ever fetched. Since
+    retention landed, the older Tillfälligt release is fetched deliberately to
+    backfill history — so that half of the contract is gone on purpose. What
+    must not change: the current release is still the newest one, and a kind
+    the user has not configured is never requested at all.
+    """
     fetched: list[str] = []
 
     async def fake_fetch(self, release_id: str, title: str) -> dict:  # noqa: ANN001
@@ -69,16 +76,16 @@ async def test_selects_only_the_newest_release_per_kind(
     ):
         data = await coordinator._async_update_data()
 
-    # Newest per configured kind; the older Tillfälligt and the unconfigured
-    # webbviner release are both skipped.
-    assert sorted(fetched) == [
-        "hitlista-3-september-2026",
-        "tillfalligt-sortiment-11-september-2026",
-    ]
+    assert "webbviner-oktober-2026" not in fetched, "fetched an unconfigured tasting type"
     assert set(data["releases"]) == {KIND_TILLFALLIGT, KIND_HITLISTAN}
     assert data["releases"][KIND_TILLFALLIGT]["release"]["id"] == (
         "tillfalligt-sortiment-11-september-2026"
     )
+    # Both Tillfälligt releases are retained, newest first.
+    assert [r["release"]["id"] for r in data["history"][KIND_TILLFALLIGT]] == [
+        "tillfalligt-sortiment-11-september-2026",
+        "tillfalligt-sortiment-4-september-2026",
+    ]
 
 
 async def test_wines_are_sorted_by_score_then_value(

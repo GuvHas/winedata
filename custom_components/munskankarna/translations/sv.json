@@ -37,11 +37,13 @@
         "data": {
           "scan_interval_hours": "Uppdateringsintervall (timmar)",
           "top_count": "Antal viner per sensor",
+          "history_count": "Antal släpp som sparas per provningstyp",
           "kinds": "Provningar att följa"
         },
         "data_description": {
           "scan_interval_hours": "Recensioner publiceras som mest en gång i veckan; 6 timmar räcker gott.",
           "top_count": "Hålls medvetet lågt: attribut sparas i databasen och skickas till alla klienter vid varje uppdatering.",
+          "history_count": "Hur många tidigare släpp som behålls, så att en instrumentpanel kan visa flera veckor samtidigt. Provningstyperna publiceras olika ofta: tre släpp är ungefär tre veckor av Tillfälligt sortiment, men cirka tre månader av Fast sortiment.",
           "kinds": "Webbviner säljs av fristående webbhandlare och saknar artikelnummer hos Systembolaget."
         }
       }

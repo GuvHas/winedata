@@ -1,14 +1,79 @@
 # Munskänkarna — Lovelace dashboard
 #
-# Everything below uses only built-in cards, so it works on a stock Home
-# Assistant with no HACS frontend dependencies. Optional variants using
-# auto-entities and flex-table-card are at the bottom.
+# Four views over the integration's data, including the retained release
+# archive:
 #
-# Install: Settings -> Dashboards -> + Add Dashboard -> three dots ->
-# "Raw configuration editor" -> paste.
+#   Veckans viner   mobile-first — this week's picks, one tap to Systembolaget
+#   Alla provningar desktop — full detail per tasting type, current release
+#   Arkiv           every retained release, grouped by publication date
+#   Höjdpunkter     the best wines and every Fynd across the whole window
+#
+# ---------------------------------------------------------------------------
+# REQUIREMENTS
+# ---------------------------------------------------------------------------
+#
+#   Home Assistant  2024.12 or newer (the `sections` view type)
+#   Integration     Munskänkarna 1.1.0 or newer, for the archive views —
+#                   they read sensor.munskankarna_history, added in 1.1.0
+#   HACS frontend   NONE. Every card in the active configuration below is
+#                   built into Home Assistant: markdown, glance, entities,
+#                   heading, button. Nothing to install.
+#
+# Two optional HACS cards (flex-table-card, auto-entities) are sketched at the
+# very bottom, commented out. They are genuine upgrades for the archive views,
+# and the dashboard is complete without them.
+#
+# ---------------------------------------------------------------------------
+# HOW TO INSTALL
+# ---------------------------------------------------------------------------
+#
+#   1. Settings -> Dashboards -> + Add Dashboard -> New dashboard from scratch
+#   2. Open it, then the pencil (top right) -> three dots -> "Raw
+#      configuration editor"
+#   3. Select all, paste this file over it, Save
+#
+# Pasting into an existing dashboard replaces its entire configuration, so
+# start a new one unless you mean to.
 #
 # Entity ids assume a single config entry and default naming. Verify yours in
-# Developer Tools -> States (filter on "munskankarna").
+# Developer Tools -> States (filter on "munskankarna"). With two config
+# entries the second set is suffixed (`..._2`), so adjust accordingly.
+#
+# ---------------------------------------------------------------------------
+# A NOTE ON THE RECORDER
+# ---------------------------------------------------------------------------
+#
+# The archive views read sensor.munskankarna_history, which carries every
+# retained release with its wines. That is the one entity in this integration
+# with a large attribute payload. The archive itself lives in `.storage`, not
+# the recorder, so nothing here is required — but if you would rather the
+# payload never reached your database at all:
+#
+#     recorder:
+#       exclude:
+#         entities:
+#           - sensor.munskankarna_history
+#
+# The per-tasting-type sensors stay small either way, so excluding this one
+# costs you the archive views and nothing else.
+#
+# ---------------------------------------------------------------------------
+# CONVENTIONS USED THROUGHOUT
+# ---------------------------------------------------------------------------
+#
+# * Responsiveness is handled by the `sections` view type: `max_columns` is an
+#   upper bound, and sections reflow to a single column on a phone. The
+#   mobile-first views keep their tables to three or four columns so they stay
+#   readable at that width; the desktop views use more.
+#
+# * Every optional field is guarded with `is not none`. That is not
+#   decoration: a markdown card that raises renders as a red error box, so one
+#   wine with no price would take out an entire table rather than its own row.
+#   Missing values show an em dash — an empty cell reads as "0 kr".
+#
+# * Anything sorted carries an explicit `rank` (the score, or -1 when absent).
+#   Jinja's sort() raises comparing None to a number, and sorting happens
+#   before any display guard can help.
 
 views:
   # =======================================================================
@@ -216,6 +281,280 @@ views:
               {% endfor %}
 
               {% else %}_Inga fynd den här veckan._{% endif %}
+
+  # =======================================================================
+  # ARCHIVE — every retained release, grouped by publication date.
+  #
+  # Reads sensor.munskankarna_history, which carries the whole archive on one
+  # entity. Grouping by date rather than by tasting type is deliberate: the
+  # question a reader has is "what came out this week", and two categories
+  # published on the same day belong together.
+  # =======================================================================
+  - title: Arkiv
+    path: arkiv
+    icon: mdi:calendar-clock
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Sparade släpp
+            heading_style: title
+            icon: mdi:calendar-clock
+
+          - type: glance
+            show_name: true
+            show_state: true
+            entities:
+              - entity: sensor.munskankarna_history
+                name: Släpp sparade
+              - entity: sensor.munskankarna_fynd_history
+                name: Fynd i arkivet
+              - entity: sensor.munskankarna_latest_release
+                name: Senaste släpp
+
+          # A one-line-per-release index, so the archive can be skimmed before
+          # scrolling into it.
+          - type: markdown
+            content: >-
+              {% set s = 'sensor.munskankarna_history' %}
+
+              {% set releases = state_attr(s,'releases') or [] %}
+
+              {% if releases %}
+
+              | Datum | Provning | Viner | Bäst |
+
+              |---|---|---:|---:|
+
+              {% for r in releases -%}
+
+              {% set scores = r.wines | map(attribute='score')
+              | select('ne', None) | list %}| {{ r.date or '—' }} |
+              {{ r.kind_label }} | {{ r.wine_count }} | {% if scores %}**{{
+              scores | max }}**{% else %}—{% endif %} |
+
+              {% endfor %}
+
+              _{{ releases | length }} släpp ·
+              {{ state_attr(s,'retained_per_kind') }} sparas per provningstyp_
+
+              {% else %}
+
+              _Inget arkiv ännu. Det fylls på vid nästa uppdatering._
+
+              {% endif %}
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Vecka för vecka
+            heading_style: title
+
+          # Grouped by date: one heading per publication date, with every
+          # release published that day beneath it.
+          - type: markdown
+            content: >-
+              {% set releases = state_attr('sensor.munskankarna_history','releases')
+              or [] %}
+
+              {% set ns = namespace(dates=[]) %}
+
+              {% for r in releases %}{% if r.date and r.date not in ns.dates %}{%
+              set ns.dates = ns.dates + [r.date] %}{% endif %}{% endfor %}
+
+              {% if releases %}
+
+              {% for d in ns.dates %}
+
+              ## {{ d }}
+
+              {% for r in releases if r.date == d %}
+
+              **{{ r.kind_label }}** — {{ r.wine_count }} vin{% if r.wine_count
+              != 1 %}er{% endif %}{% if r.stale %} · ⚠️ visar tidigare
+              hämtning{% endif %}
+
+              {% if r.wines %}
+
+              | Betyg | Vin | Pris | |
+
+              |---:|---|---:|---|
+
+              {% for w in r.wines -%}
+
+              | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
+              %}** | {{ w.name }}{% if w.value == 'fynd' %} ⭐{% endif %} | {% if
+              w.price is not none %}{{ w.price | round(0) }} kr{% else %}—{%
+              endif %} | {% if w.url or w.review_url %}[🔗]({{ w.url or
+              w.review_url }}){% endif %} |
+
+              {% endfor %}
+
+              {% else %}
+
+              _Inga viner i det här släppet._
+
+              {% endif %}
+
+              {% endfor %}
+
+              {% endfor %}
+
+              {% set undated = releases | rejectattr('date') | list %}
+
+              {% if undated %}
+
+              ## Utan datum
+
+              {% for r in undated %}
+
+              **{{ r.kind_label }}** — {{ r.wine_count }} vin{% if r.wine_count
+              != 1 %}er{% endif %}
+
+              {% endfor %}
+
+              {% endif %}
+
+              {% else %}
+
+              _Inget arkiv ännu._
+
+              {% endif %}
+
+  # =======================================================================
+  # HIGHLIGHTS — the best of the whole retained window, ignoring which week
+  # a wine came from. This is the "what should I actually buy" view.
+  # =======================================================================
+  - title: Höjdpunkter
+    path: hojdpunkter
+    icon: mdi:trophy
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Bäst i arkivet
+            heading_style: title
+            icon: mdi:trophy
+
+          # Top ten by score across every retained release.
+          - type: markdown
+            content: >-
+              {% set releases = state_attr('sensor.munskankarna_history','releases')
+              or [] %}
+
+              {% set ns = namespace(rows=[]) %}
+
+              {% for r in releases %}{% for w in r.wines %}{% set ns.rows =
+              ns.rows + [dict(w, when=r.date, kind=r.kind_label,
+              rank=(w.score if w.score is not none else -1))] %}{% endfor %}{%
+              endfor %}
+
+              {% set rows = (ns.rows | sort(attribute='rank', reverse=true))[:10] %}
+
+              {% if rows %}
+
+              | Betyg | Vin | Provning | Datum | Pris | |
+
+              |---:|---|---|---|---:|---|
+
+              {% for w in rows -%}
+
+              | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
+              %}** | {{ w.name }}{% if w.value == 'fynd' %} ⭐{% endif
+              %}<br><sub>{{ w.producer or '—' }}</sub> | {{ w.kind }} |
+              {{ w.when or '—' }} | {% if w.price is not none %}{{ w.price |
+              round(0) }} kr{% else %}—{% endif %} | {% if w.url or w.review_url
+              %}[🔗]({{ w.url or w.review_url }}){% endif %} |
+
+              {% endfor %}
+
+              {% else %}
+
+              _Inget arkiv ännu._
+
+              {% endif %}
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Alla fynd i fönstret
+            heading_style: title
+            icon: mdi:tag-heart
+
+          # Every Fynd across the window, best first.
+          - type: markdown
+            content: >-
+              {% set releases = state_attr('sensor.munskankarna_history','releases')
+              or [] %}
+
+              {% set ns = namespace(rows=[]) %}
+
+              {% for r in releases %}{% for w in r.wines %}{% if w.value ==
+              'fynd' %}{% set ns.rows = ns.rows + [dict(w, when=r.date,
+              kind=r.kind_label, rank=(w.score if w.score is not none else -1))]
+              %}{% endif %}{% endfor %}{% endfor %}
+
+              {% set rows = ns.rows | sort(attribute='rank', reverse=true) %}
+
+              {% if rows %}
+
+              | Betyg | Vin | Datum | Pris | kr/l | |
+
+              |---:|---|---|---:|---:|---|
+
+              {% for w in rows -%}
+
+              | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
+              %}** | {{ w.name }}<br><sub>{{ w.kind }}</sub> | {{ w.when or '—'
+              }} | {% if w.price is not none %}{{ w.price | round(0) }} kr{%
+              else %}—{% endif %} | {% if w.price_per_litre is not none %}{{
+              w.price_per_litre | round(0) }}{% else %}—{% endif %} | {% if
+              w.url or w.review_url %}[🔗]({{ w.url or w.review_url }}){% endif
+              %} |
+
+              {% endfor %}
+
+              _{{ rows | length }} fynd i arkivet_
+
+              {% else %}
+
+              _Inga fynd i arkivet ännu._
+
+              {% endif %}
+
+          - type: markdown
+            content: >-
+              {% set s = 'sensor.munskankarna_fynd_history' %}
+
+              {% set per = state_attr(s,'per_kind') or {} %}
+
+              {% set labels = state_attr(s,'kind_labels') or {} %}
+
+              {% if per %}
+
+              | Provningstyp | Fynd |
+
+              |---|---:|
+
+              {% for kind, count in per.items() -%}
+
+              | {{ labels.get(kind, kind) }} | **{{ count }}** |
+
+              {% endfor %}
+
+              {% endif %}
+
+              _Arkivet sparar de senaste släppen per provningstyp.
+              Provningstyperna publiceras olika ofta — Tillfälligt sortiment
+              varje vecka, Hitlistan varannan, Fast sortiment och Lokalt och
+              småskaligt ungefär månadsvis — så tre släpp är ungefär tre veckor
+              för den första och snarare tre månader för de andra. Ändra djupet
+              under Inställningar -> Enheter och tjänster -> Munskänkarna ->
+              Konfigurera._
 
 # ==========================================================================
 # OPTIONAL: custom cards (install via HACS -> Frontend)

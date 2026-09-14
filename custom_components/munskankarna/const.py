@@ -15,6 +15,7 @@ CONF_PASSWORD: Final = "password"
 CONF_BASE_URL: Final = "base_url"
 CONF_SCAN_INTERVAL_HOURS: Final = "scan_interval_hours"
 CONF_TOP_COUNT: Final = "top_count"
+CONF_HISTORY_COUNT: Final = "history_count"
 CONF_KINDS: Final = "kinds"
 CONF_MQTT_ENABLED: Final = "mqtt_enabled"
 CONF_MQTT_TOPIC: Final = "mqtt_topic"
@@ -45,6 +46,24 @@ MAX_TOP_COUNT: Final = 25
 #: same field. Attributes are recorded and broadcast on every update, so this
 #: is bounded rather than trusted.
 MAX_SUMMARY_LENGTH: Final = 280
+
+#: How many releases to retain per tasting type. Retention is count-based
+#: rather than age-based on purpose. Measured from the live release index, the
+#: categories publish on very different cadences: Tillfälligt sortiment every
+#: 7 days, Hitlistan every 14, Lokalt och småskaligt every 28–35, Fast
+#: sortiment every 30–62. A fixed 21-day window would therefore hold 3–4
+#: releases for one category and *nothing at all* for the others through most
+#: of each month — worse than the single-release behaviour it replaced.
+#:
+#: The trade-off this makes instead: for a monthly category, three releases
+#: reach back about three months rather than three weeks.
+DEFAULT_HISTORY_COUNT: Final = 3
+
+#: Ceiling on retained releases. Each retained release costs a full attribute
+#: payload on every sensor update — at the measured 562 bytes per wine and the
+#: default cap of 10 wines, roughly 5.6 kB per release per kind. Six keeps the
+#: worst case near 34 kB per kind; the default of three is about 17 kB.
+MAX_HISTORY_COUNT: Final = 6
 
 DEFAULT_MQTT_TOPIC: Final = "munskankarna/wines"
 

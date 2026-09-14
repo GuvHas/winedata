@@ -15,23 +15,28 @@ from typing import Any, Final, TypedDict
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.ssl import get_default_context
 
 from .api import InvalidAuth, MunskankarnaClient, MunskankarnaError, RateLimited
 from .const import (
     CONF_BASE_URL,
+    CONF_HISTORY_COUNT,
     CONF_KINDS,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL_HOURS,
     CONF_TOP_COUNT,
     CONF_USERNAME,
     DEFAULT_BASE_URL,
+    DEFAULT_HISTORY_COUNT,
     DEFAULT_KINDS,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_TOP_COUNT,
     DOMAIN,
+    MAX_HISTORY_COUNT,
     MAX_TOP_COUNT,
+    VALUE_FYND,
     VALUE_ORDER,
 )
 from .parser import ParseResult, ReleaseDict, WineDict
@@ -49,6 +54,18 @@ _DEFAULT_COOLDOWN: Final = 900.0
 #: otherwise park the integration for days with no way back but a reload.
 _MAX_COOLDOWN: Final = 6 * 3600.0
 
+#: Schema version of the on-disk history cache.
+STORAGE_VERSION: Final = 1
+
+
+def history_storage_key(entry_id: str) -> str:
+    """Where one config entry's retained releases live under `.storage`.
+
+    Per entry, so two entries pointing at different sites cannot share or
+    overwrite a cache — the same reasoning that scopes the MQTT topics.
+    """
+    return f"{DOMAIN}.history_{entry_id}"
+
 
 
 
@@ -56,6 +73,10 @@ class CoordinatorData(TypedDict):
     """Everything the sensors need, keyed by tasting kind."""
 
     releases: dict[str, ParseResult]
+    #: The retained releases per kind, newest first. `releases` is the head of
+    #: each of these lists; it is kept as its own key so every existing sensor,
+    #: template and MQTT consumer keeps working unchanged.
+    history: dict[str, list[ParseResult]]
     warnings: list[str]
     last_success: str
 
@@ -99,6 +120,50 @@ def newest_per_kind(releases: list[ReleaseDict], kinds: list[str]) -> dict[str, 
     return chosen
 
 
+def merge_history(
+    existing: list[ParseResult], incoming: list[ParseResult], limit: int
+) -> list[ParseResult]:
+    """Fold this cycle's results into the retained ones, newest first.
+
+    Keyed by release id, so re-polling the current release updates it in place
+    rather than stacking a second copy. Incoming wins: it is the fresher read.
+
+    Retention is count-based (see `DEFAULT_HISTORY_COUNT` for why), and the
+    limit is floored at one — however the option is set, losing the current
+    release is never an acceptable outcome.
+
+    Returns a new list; the caller's snapshot is shared and must not be mutated.
+    """
+    by_id: dict[str, ParseResult] = {r["release"]["id"]: r for r in existing}
+    by_id.update({r["release"]["id"]: r for r in incoming})
+
+    ordered = sorted(
+        by_id.values(), key=lambda r: _release_sort_key(r["release"]), reverse=True
+    )
+    return ordered[: max(1, limit)]
+
+
+def newest_releases_per_kind(
+    releases: list[ReleaseDict], kinds: list[str], limit: int
+) -> dict[str, list[ReleaseDict]]:
+    """The most recent `limit` releases for each requested tasting type.
+
+    Same ordering rule as `newest_per_kind`: dated releases outrank undated
+    ones, so a stray missing date cannot mask the current week.
+    """
+    grouped: dict[str, list[ReleaseDict]] = {}
+    for release in releases:
+        kind = release.get("kind")
+        if kind not in kinds:
+            continue
+        grouped.setdefault(kind, []).append(release)
+
+    return {
+        kind: sorted(items, key=_release_sort_key, reverse=True)[: max(1, limit)]
+        for kind, items in grouped.items()
+    }
+
+
 def _release_sort_key(release: ReleaseDict) -> tuple[int, str]:
     """Dated releases outrank undated ones; otherwise compare ISO dates."""
     date = release.get("date")
@@ -117,6 +182,14 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         #: 429's Retry-After. Monotonic rather than wall clock so a system
         #: clock change cannot extend or cancel it.
         self._rate_limited_until: float = 0.0
+        #: The retained releases, persisted outside the recorder. `.storage` is
+        #: a document cache: no recorder rows, no websocket traffic, and a
+        #: restart does not re-read a dozen unchanged release pages.
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, history_storage_key(entry.entry_id)
+        )
+        #: History read back from disk, used until the first cycle replaces it.
+        self._restored_history: dict[str, list[ParseResult]] = {}
         hours = entry.options.get(CONF_SCAN_INTERVAL_HOURS)
         interval = timedelta(hours=hours) if hours else DEFAULT_SCAN_INTERVAL
 
@@ -154,6 +227,22 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return DEFAULT_TOP_COUNT
         return min(value, MAX_TOP_COUNT)
 
+    @property
+    def history_count(self) -> int:
+        """How many releases to retain per tasting type.
+
+        Clamped like `top_count`: the options schema only constrains a form
+        being submitted, and each retained release costs a full attribute
+        payload on every update.
+        """
+        try:
+            value = int(self.entry.options.get(CONF_HISTORY_COUNT) or DEFAULT_HISTORY_COUNT)
+        except (TypeError, ValueError):
+            return DEFAULT_HISTORY_COUNT
+        if value < 1:
+            return DEFAULT_HISTORY_COUNT
+        return min(value, MAX_HISTORY_COUNT)
+
     def _client(self) -> MunskankarnaClient:
         """Build an API client for one update cycle.
 
@@ -167,6 +256,50 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self.entry.data.get(CONF_PASSWORD),
             verify=get_default_context(),
         )
+
+    # -- persisted history -------------------------------------------------
+
+    async def async_load_history(self) -> None:
+        """Restore the retained releases from disk before the first poll.
+
+        A cache is an optimisation, never a dependency: anything unreadable or
+        the wrong shape is discarded and the cycle simply refetches.
+        """
+        try:
+            stored = await self._store.async_load()
+        except Exception:  # noqa: BLE001 - a bad cache must never block setup
+            _LOGGER.warning("Could not read the stored history; starting empty",
+                            exc_info=True)
+            return
+
+        history = (stored or {}).get("history")
+        if not isinstance(history, dict):
+            if history is not None:
+                _LOGGER.warning("Stored history had an unexpected shape; ignoring it")
+            return
+
+        restored = {
+            kind: releases
+            for kind, releases in history.items()
+            if isinstance(releases, list) and releases
+        }
+        self._restored_history = restored
+        if restored:
+            _LOGGER.debug(
+                "Restored %d retained release(s) from storage",
+                sum(len(v) for v in restored.values()),
+            )
+
+    async def _async_save_history(self, history: dict[str, list[ParseResult]]) -> None:
+        """Persist the retained releases. Never fatal to an update."""
+        try:
+            await self._store.async_save({"history": history})
+        except Exception:  # noqa: BLE001 - failing to cache is not failing to update
+            _LOGGER.warning("Could not persist the history cache", exc_info=True)
+
+    async def async_remove_storage(self) -> None:
+        """Delete the cache when the config entry is removed."""
+        await self._store.async_remove()
 
     # -- rate-limit cooldown -----------------------------------------------
 
@@ -256,7 +389,7 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         except MunskankarnaError as err:
             raise UpdateFailed(f"Could not fetch the Munskänkarna release index: {err}") from err
 
-        wanted = newest_per_kind(index, self.kinds)
+        wanted = newest_releases_per_kind(index, self.kinds, self.history_count)
         if not wanted:
             raise UpdateFailed(
                 "No releases matched the configured tasting types; "
@@ -264,51 +397,99 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
 
         releases: dict[str, ParseResult] = {}
+        history: dict[str, list[ParseResult]] = {}
         warnings: list[str] = []
         #: What the previous cycle published, so a kind that cannot be
         #: refreshed keeps what it had rather than vanishing from the snapshot.
         previous: dict[str, ParseResult] = (self.data or {}).get("releases", {})
+        previous_history: dict[str, list[ParseResult]] = (
+            (self.data or {}).get("history") or self._restored_history
+        )
 
-        for kind, release in wanted.items():
-            try:
-                result = await self._async_fetch_release(release["id"], release["title"])
-            except RateLimited as err:
-                # Stop the cycle rather than keep requesting from a server that
-                # has just asked us to back off. Whatever loaded before the
-                # limit is still published — but the cooldown still applies, so
-                # the next poll does not walk straight back into the limit.
-                self._begin_cooldown(err.retry_after)
-                warnings.append(f"{release['id']}: {err}")
-                _LOGGER.warning(
-                    "Rate limited fetching %s; abandoning the rest of this update",
-                    release["id"],
-                )
+        rate_limited = False
+
+        for kind, candidates in wanted.items():
+            if rate_limited:
                 break
-            except MunskankarnaError as err:
-                # One bad release must not blank the other sensors.
-                warnings.append(f"{release['id']}: {err}")
-                _LOGGER.warning("Could not fetch release %s: %s", release["id"], err)
-                continue
 
-            if not result.get("page_valid", True):
-                # An unrecognised page parses to zero wines just like a quiet
-                # week does. Accepting it would replace good cached data with a
-                # 0-wine state; skipping it leaves the previous data in place
-                # and, if nothing else loaded, fails the update below.
-                warnings.append(
-                    f"{release['id']}: the page was not recognised as a release page"
-                )
-                _LOGGER.warning(
-                    "Release %s did not look like a release page; keeping the previous "
-                    "data for this tasting type",
-                    release["id"],
-                )
-                continue
+            cached = {r["release"]["id"]: r for r in previous_history.get(kind, [])}
+            collected: list[ParseResult] = []
+            #: Whether a page was actually read for this kind this cycle, as
+            #: opposed to being served from the cache.
+            fetched_any = False
+            #: Whether the *current* release — candidate 0 — was among them.
+            #: Tracked separately because backfilling an older candidate is not
+            #: evidence that this week's release loaded.
+            current_refreshed = False
 
+            for position, release in enumerate(candidates):
+                release_id = release["id"]
 
-            result["wines"] = sort_wines(result["wines"])
-            warnings.extend(result.get("warnings") or [])
-            releases[kind] = result
+                # A published release page does not change; only the newest one
+                # can still gain corrections. Re-reading the rest every cycle
+                # would triple the request count against a small volunteer-run
+                # site for no new information.
+                if position > 0 and release_id in cached:
+                    collected.append(cached[release_id])
+                    continue
+
+                try:
+                    result = await self._async_fetch_release(release_id, release["title"])
+                except RateLimited as err:
+                    # Stop the cycle rather than keep requesting from a server
+                    # that has just asked us to back off. Whatever loaded before
+                    # the limit is still published — but the cooldown still
+                    # applies, so the next poll does not walk straight back in.
+                    self._begin_cooldown(err.retry_after)
+                    warnings.append(f"{release_id}: {err}")
+                    _LOGGER.warning(
+                        "Rate limited fetching %s; abandoning the rest of this update",
+                        release_id,
+                    )
+                    rate_limited = True
+                    break
+                except MunskankarnaError as err:
+                    # One bad release must not blank the other sensors.
+                    warnings.append(f"{release_id}: {err}")
+                    _LOGGER.warning("Could not fetch release %s: %s", release_id, err)
+                    continue
+
+                if not result.get("page_valid", True):
+                    # An unrecognised page parses to zero wines just like a quiet
+                    # week does. Accepting it would replace good cached data with
+                    # a 0-wine state; skipping it leaves the previous data in
+                    # place and, if nothing else loaded, fails the update below.
+                    warnings.append(
+                        f"{release_id}: the page was not recognised as a release page"
+                    )
+                    _LOGGER.warning(
+                        "Release %s did not look like a release page; keeping the "
+                        "previous data for this tasting type",
+                        release_id,
+                    )
+                    continue
+
+                result["wines"] = sort_wines(result["wines"])
+                warnings.extend(result.get("warnings") or [])
+                collected.append(result)
+                fetched_any = True
+                if position == 0:
+                    current_refreshed = True
+
+            merged = merge_history(
+                previous_history.get(kind, []), collected, self.history_count
+            )
+            if merged:
+                history[kind] = merged
+                if current_refreshed:
+                    # The current release is the newest retained one.
+                    releases[kind] = merged[0]
+                elif fetched_any:
+                    # Older candidates loaded but this week's page did not. The
+                    # newest release we hold is still the best answer, but it is
+                    # not freshly confirmed — publishing it unflagged would show
+                    # last week's wines as this week's.
+                    releases[kind] = {**merged[0], "stale": True}
 
         # Nothing refreshed this cycle: fail, so Home Assistant keeps the whole
         # previous snapshot rather than republishing it as if it were current.
@@ -327,9 +508,14 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 continue
             if (carried := previous.get(kind)) is not None:
                 releases[kind] = {**carried, "stale": True}
+            if kind not in history and (carried_history := previous_history.get(kind)):
+                history[kind] = carried_history
+
+        await self._async_save_history(history)
 
         return CoordinatorData(
             releases=releases,
+            history=history,
             warnings=warnings,
             last_success=datetime.now().astimezone().isoformat(timespec="seconds"),
         )
@@ -357,6 +543,37 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for result in self.data["releases"].values():
             wines.extend(result["wines"])
         return sort_wines(wines)
+
+    def retained(self, kind: str) -> list[ParseResult]:
+        """Every retained release for a tasting kind, newest first."""
+        if not self.data:
+            return []
+        return self.data.get("history", {}).get(kind, [])
+
+    def retained_releases(self) -> list[tuple[str, ParseResult]]:
+        """(kind, release) for every retained release, newest first across kinds.
+
+        Flattened here rather than in the sensor: a dashboard reads one list in
+        publication order, which is not the same as "grouped by kind".
+        """
+        if not self.data:
+            return []
+        pairs = [
+            (kind, result)
+            for kind, results in self.data.get("history", {}).items()
+            for result in results
+        ]
+        pairs.sort(key=lambda pair: _release_sort_key(pair[1]["release"]), reverse=True)
+        return pairs
+
+    def fynd_in_history(self) -> dict[str, int]:
+        """How many Fynd each kind published across its retained releases."""
+        counts: dict[str, int] = {}
+        for kind, result in self.retained_releases():
+            counts[kind] = counts.get(kind, 0) + sum(
+                1 for wine in result["wines"] if wine.get("value_rating") == VALUE_FYND
+            )
+        return counts
 
     def as_payload(self, limit: int | None = None) -> dict[str, Any]:
         """A JSON-serialisable snapshot, used by the MQTT bridge and diagnostics."""

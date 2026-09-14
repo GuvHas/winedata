@@ -37,11 +37,13 @@
         "data": {
           "scan_interval_hours": "Update interval (hours)",
           "top_count": "Wines per sensor",
+          "history_count": "Releases kept per tasting type",
           "kinds": "Tastings to track"
         },
         "data_description": {
           "scan_interval_hours": "Reviews are published weekly at most; 6 hours is ample.",
           "top_count": "Kept small on purpose: attributes are recorded and sent to every client on each update.",
+          "history_count": "How many past releases to retain, so a dashboard can show several weeks at once. Categories publish on different cadences: three releases is about three weeks of Tillfälligt sortiment, but roughly three months of Fast sortiment.",
           "kinds": "Webbviner are sold by independent merchants and have no Systembolaget article number."
         }
       }
