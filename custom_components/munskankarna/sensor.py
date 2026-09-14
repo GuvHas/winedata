@@ -11,6 +11,7 @@ Entity design is shaped by two Home Assistant constraints:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
@@ -23,6 +24,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MunskankarnaConfigEntry
 from .const import (
+    ATTRIBUTE_BUDGET,
     DEFAULT_NAME,
     DOMAIN,
     KIND_LABELS,
@@ -71,6 +73,60 @@ def truncate(value: str | None, limit: int) -> str | None:
     if value is None or len(value) <= limit:
         return value
     return value[: limit - 1].rstrip() + "…"
+
+
+def _attribute_bytes(payload: dict[str, Any]) -> int:
+    """Payload size as the recorder measures it."""
+    return len(json.dumps(payload, ensure_ascii=False, default=str).encode())
+
+
+def largest_fitting(
+    build: Callable[[int], dict[str, Any]], most: int
+) -> tuple[int, dict[str, Any]]:
+    """The biggest item count whose payload still fits `ATTRIBUTE_BUDGET`.
+
+    Binary search rather than a descending scan: payload size grows
+    monotonically with the count, so ~5 serialisations settle it instead of up
+    to `most`.
+
+    Trimming is what keeps the integration inside the recorder's limit for
+    *every* reachable combination of options, not just the shipped defaults.
+    """
+    if (payload := build(most)) and _attribute_bytes(payload) <= ATTRIBUTE_BUDGET:
+        return most, payload
+
+    low, high = 0, most
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _attribute_bytes(build(mid)) <= ATTRIBUTE_BUDGET:
+            low = mid
+        else:
+            high = mid - 1
+    return low, build(low)
+
+
+def history_wine(wine: WineDict) -> dict[str, Any]:
+    """A wine as the archive carries it: only what a history card renders.
+
+    Deliberately leaner than `wine_summary` — 8 fields rather than 17, and
+    about 240 bytes rather than 587. The archive holds every retained release
+    of every tracked type, so per-wine cost is multiplied by two orders of
+    magnitude more wines than the current-release sensors carry.
+
+    `url` collapses the product link and the review link into one field: a
+    card wants "where do I click", and carrying both doubled the largest
+    single field for no gain.
+    """
+    return {
+        "name": markdown_safe(wine.get("name")),
+        "vintage": wine.get("vintage"),
+        "producer": markdown_safe(wine.get("producer")),
+        "score": wine.get("score"),
+        "value": wine.get("value_rating"),
+        "price": wine.get("price_sek"),
+        "price_per_litre": wine.get("price_per_litre"),
+        "url": wine.get("product_url") or wine.get("review_url"),
+    }
 
 
 def release_summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
@@ -149,6 +205,39 @@ def _latest_release_date(coordinator: MunskankarnaCoordinator) -> str | None:
     return max(dates) if dates else None
 
 
+def _history_attributes(coordinator: MunskankarnaCoordinator) -> dict[str, Any]:
+    """The archive, trimmed to fit the recorder's attribute limit.
+
+    Every retained release keeps its metadata whatever happens — dates, counts
+    and links are the timeline, and dropping a week would make the archive lie
+    about what was published. Only the wine lists are trimmed, uniformly, so
+    the depth is the same for every week and can be stated in one number.
+
+    `wines_per_release` and `truncated` publish that decision rather than
+    hiding it: silent truncation is the failure this whole design avoids.
+    """
+    pairs = coordinator.retained_releases()
+    ceiling = coordinator.top_count
+
+    def build(cap: int) -> dict[str, Any]:
+        return {
+            "retained_per_kind": coordinator.history_count,
+            "wines_per_release": cap,
+            "truncated": cap < ceiling,
+            "releases": [
+                {
+                    **release_summary(kind, result),
+                    "kind_label": KIND_LABELS.get(kind, kind),
+                    "wines": [history_wine(w) for w in result["wines"][:cap]],
+                }
+                for kind, result in pairs
+            ],
+        }
+
+    _, payload = largest_fitting(build, ceiling)
+    return payload
+
+
 GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
     MunskankarnaSensorDescription(
         key="top_pick",
@@ -200,19 +289,7 @@ GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
         native_unit_of_measurement="provningar",
         # A scalar state; the archive itself is in attributes, as it must be.
         value_fn=lambda c: len(c.retained_releases()),
-        attributes_fn=lambda c: {
-            "retained_per_kind": c.history_count,
-            "releases": [
-                {
-                    **release_summary(kind, result),
-                    "kind_label": KIND_LABELS.get(kind, kind),
-                    # Capped per release: this one entity carries the whole
-                    # archive, so the cap is what bounds it as retention grows.
-                    "wines": [wine_summary(w) for w in result["wines"][: c.top_count]],
-                }
-                for kind, result in c.retained_releases()
-            ],
-        },
+        attributes_fn=lambda c: _history_attributes(c),
     ),
     MunskankarnaSensorDescription(
         key="fynd_history",
@@ -350,25 +427,37 @@ class MunskankarnaReleaseSensor(MunskankarnaEntity):
         if result is None:
             return {}
         release = result["release"]
-        return {
-            "kind": self._kind,
-            "kind_label": KIND_LABELS.get(self._kind, self._kind),
-            "release_id": release["id"],
-            "release_title": markdown_safe(release["title"]),
-            "release_date": release["date"],
-            "release_url": release["url"],
-            # True when this cycle could not refresh the release and the
-            # previous result was carried over. Serving last week's wines is
-            # better than blanking the sensor, but it must not be silent.
-            "stale": bool(result.get("stale")),
-            "summary": truncate(markdown_safe(release["summary"]), MAX_SUMMARY_LENGTH),
-            "wines": [
-                wine_summary(w) for w in self.coordinator.top_wines(self._kind)
-            ],
-            # Summaries only — dates and counts, no wine lists. Retention must
-            # not grow the sensors that were already sized carefully.
-            "history": [
-                release_summary(self._kind, r)
-                for r in self.coordinator.retained(self._kind)
-            ],
-        }
+        wines = self.coordinator.top_wines(self._kind)
+
+        def build(cap: int) -> dict[str, Any]:
+            return {
+                "kind": self._kind,
+                "kind_label": KIND_LABELS.get(self._kind, self._kind),
+                "release_id": release["id"],
+                "release_title": markdown_safe(release["title"]),
+                "release_date": release["date"],
+                "release_url": release["url"],
+                # True when this cycle could not refresh the release and the
+                # previous result was carried over. Serving last week's wines
+                # is better than blanking the sensor, but it must not be silent.
+                "stale": bool(result.get("stale")),
+                "summary": truncate(
+                    markdown_safe(release["summary"]), MAX_SUMMARY_LENGTH
+                ),
+                "wines_shown": cap,
+                "truncated": cap < len(wines),
+                "wines": [wine_summary(w) for w in wines[:cap]],
+                # Summaries only — dates and counts, no wine lists. Retention
+                # must not grow the sensors that were already sized carefully.
+                "history": [
+                    release_summary(self._kind, r)
+                    for r in self.coordinator.retained(self._kind)
+                ],
+            }
+
+        # At the option ceiling of 25 wines this payload measured 15.8 kB of
+        # the recorder's 16 kB limit before retention added the history
+        # summaries — close enough that one long wine name breached it. Trim
+        # rather than trust the arithmetic.
+        _, payload = largest_fitting(build, len(wines))
+        return payload

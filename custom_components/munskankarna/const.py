@@ -47,6 +47,21 @@ MAX_TOP_COUNT: Final = 25
 #: is bounded rather than trusted.
 MAX_SUMMARY_LENGTH: Final = 280
 
+#: Home Assistant's recorder refuses to store a state whose attributes exceed
+#: this many bytes, logging "State attributes for ... exceed maximum size of
+#: 16384 bytes" and dropping them: the entity keeps working live while its
+#: history is silently lost. Mirrors MAX_STATE_ATTRS_BYTES in
+#: homeassistant/components/recorder/db_schema.py, and a test pins the two
+#: together. Mirrored rather than imported because the recorder may not be
+#: loaded at all, and a sensor platform should not depend on it.
+MAX_ATTRIBUTE_BYTES: Final = 16384
+
+#: How much of that an integration may actually spend. Home Assistant injects
+#: its own attributes — friendly_name, icon, unit_of_measurement, device_class,
+#: attribution — *after* the payload is built, so a design that lands exactly
+#: on the limit breaches it in practice. 87.5% leaves 2 KiB of headroom.
+ATTRIBUTE_BUDGET: Final = 14336
+
 #: How many releases to retain per tasting type. Retention is count-based
 #: rather than age-based on purpose. Measured from the live release index, the
 #: categories publish on very different cadences: Tillfälligt sortiment every

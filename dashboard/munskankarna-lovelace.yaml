@@ -74,6 +74,18 @@
 # * Anything sorted carries an explicit `rank` (the score, or -1 when absent).
 #   Jinja's sort() raises comparing None to a number, and sorting happens
 #   before any display guard can help.
+#
+# * Wines in the *archive* views carry a leaner set of fields than wines in
+#   the current-release views: name, vintage, producer, score, value, price,
+#   price_per_litre and url. `url` is already the product link falling back to
+#   the review page, so there is no `review_url` to check there. The archive
+#   spans every retained release of every tracked type, and the full field set
+#   put it over Home Assistant's 16 KiB recorder limit.
+#
+# * The history sensor publishes `wines_per_release` and `truncated`. When the
+#   archive is too large for one attribute payload, the wine lists are trimmed
+#   uniformly and those two attributes say so — every release always keeps its
+#   date, count and link.
 
 views:
   # =======================================================================
@@ -387,8 +399,7 @@ views:
               | **{% if w.score is not none %}{{ w.score }}{% else %}—{% endif
               %}** | {{ w.name }}{% if w.value == 'fynd' %} ⭐{% endif %} | {% if
               w.price is not none %}{{ w.price | round(0) }} kr{% else %}—{%
-              endif %} | {% if w.url or w.review_url %}[🔗]({{ w.url or
-              w.review_url }}){% endif %} |
+              endif %} | {% if w.url %}[🔗]({{ w.url }}){% endif %} |
 
               {% endfor %}
 
@@ -467,8 +478,8 @@ views:
               %}** | {{ w.name }}{% if w.value == 'fynd' %} ⭐{% endif
               %}<br><sub>{{ w.producer or '—' }}</sub> | {{ w.kind }} |
               {{ w.when or '—' }} | {% if w.price is not none %}{{ w.price |
-              round(0) }} kr{% else %}—{% endif %} | {% if w.url or w.review_url
-              %}[🔗]({{ w.url or w.review_url }}){% endif %} |
+              round(0) }} kr{% else %}—{% endif %} | {% if w.url %}[🔗]({{
+              w.url }}){% endif %} |
 
               {% endfor %}
 
@@ -513,8 +524,7 @@ views:
               }} | {% if w.price is not none %}{{ w.price | round(0) }} kr{%
               else %}—{% endif %} | {% if w.price_per_litre is not none %}{{
               w.price_per_litre | round(0) }}{% else %}—{% endif %} | {% if
-              w.url or w.review_url %}[🔗]({{ w.url or w.review_url }}){% endif
-              %} |
+              w.url %}[🔗]({{ w.url }}){% endif %} |
 
               {% endfor %}
 

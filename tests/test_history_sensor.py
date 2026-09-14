@@ -102,26 +102,38 @@ async def test_history_wines_are_capped_per_release(hass: HomeAssistant) -> None
 
     for release in state.attributes["releases"]:
         assert len(release["wines"]) == 3, "top_count was not applied per release"
-    # Full wine detail, as chosen: the same projection the current release uses.
+    # A lean projection, not the full wine_summary the current-release sensors
+    # carry. The archive multiplies per-wine cost across every retained release
+    # of every tracked type, and the full shape put it over the recorder's
+    # 16 KiB attribute limit in every configuration.
     wine = state.attributes["releases"][0]["wines"][0]
-    for field in ("name", "score", "price", "value", "url", "article_number", "vintage"):
+    for field in ("name", "score", "price", "value", "url", "vintage",
+                  "producer", "price_per_litre"):
         assert field in wine, f"{field} missing from a history wine"
+    # Dropped on purpose: no history card renders these.
+    for field in ("full_name", "band", "volume_ml", "color", "country", "region",
+                  "grapes", "article_number", "review_url"):
+        assert field not in wine, f"{field} is dead weight in the archive"
 
 
 async def test_the_history_payload_stays_within_its_budget(hass: HomeAssistant) -> None:
-    """Measured, not assumed: this is the attribute that could get expensive.
+    """Measured against Home Assistant's own limit, not a number I picked.
 
-    Five retained releases at the default cap of 10 wines is the realistic
-    worst case for the four default categories. Measured at ~562 bytes per
-    wine, that lands near 30 kB; the ceiling here is deliberately generous so
-    the test flags a shape change rather than normal variation.
+    This assertion previously read `< 120_000`, roughly seven times the
+    recorder's actual ceiling, so it passed while every shipped configuration
+    breached it. Pin it to the constant the recorder enforces.
     """
+    from homeassistant.components.recorder.db_schema import MAX_STATE_ATTRS_BYTES
+
     entry = await _setup(hass, top_count=10)
     state = hass.states.get(_entity(hass, entry.entry_id, "history"))
 
     payload = json.dumps(dict(state.attributes), ensure_ascii=False, default=str)
     size = len(payload.encode())
-    assert size < 120_000, f"history attributes grew to {size:,} bytes"
+    assert size <= MAX_STATE_ATTRS_BYTES, (
+        f"history attributes are {size:,} bytes, over the recorder's "
+        f"{MAX_STATE_ATTRS_BYTES:,}"
+    )
 
 
 async def test_the_existing_per_kind_sensors_did_not_grow(hass: HomeAssistant) -> None:
