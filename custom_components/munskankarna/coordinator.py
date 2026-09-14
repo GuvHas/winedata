@@ -415,9 +415,12 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             cached = {r["release"]["id"]: r for r in previous_history.get(kind, [])}
             collected: list[ParseResult] = []
             #: Whether a page was actually read for this kind this cycle, as
-            #: opposed to being served from the cache. Only a real read counts
-            #: the kind as refreshed.
+            #: opposed to being served from the cache.
             fetched_any = False
+            #: Whether the *current* release — candidate 0 — was among them.
+            #: Tracked separately because backfilling an older candidate is not
+            #: evidence that this week's release loaded.
+            current_refreshed = False
 
             for position, release in enumerate(candidates):
                 release_id = release["id"]
@@ -470,15 +473,23 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 warnings.extend(result.get("warnings") or [])
                 collected.append(result)
                 fetched_any = True
+                if position == 0:
+                    current_refreshed = True
 
             merged = merge_history(
                 previous_history.get(kind, []), collected, self.history_count
             )
             if merged:
                 history[kind] = merged
-                if fetched_any:
+                if current_refreshed:
                     # The current release is the newest retained one.
                     releases[kind] = merged[0]
+                elif fetched_any:
+                    # Older candidates loaded but this week's page did not. The
+                    # newest release we hold is still the best answer, but it is
+                    # not freshly confirmed — publishing it unflagged would show
+                    # last week's wines as this week's.
+                    releases[kind] = {**merged[0], "stale": True}
 
         # Nothing refreshed this cycle: fail, so Home Assistant keeps the whole
         # previous snapshot rather than republishing it as if it were current.

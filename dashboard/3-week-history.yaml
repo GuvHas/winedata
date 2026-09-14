@@ -206,9 +206,15 @@ views:
 
               {% for r in releases %}{% for w in r.wines %}{% if w.value ==
               'fynd' %}{% set ns.rows = ns.rows + [dict(w, when=r.date,
-              kind=r.kind_label)] %}{% endif %}{% endfor %}{% endfor %}
+              kind=r.kind_label, rank=(w.score if w.score is not none else -1))]
+              %}{% endif %}{% endfor %}{% endfor %}
 
-              {% set rows = ns.rows | sort(attribute='score', reverse=true) %}
+              {# Sort on `rank`, never on `score`: a wine may legitimately have
+                 no score, and Jinja's sort() raises comparing None to a float —
+                 which renders the whole card as an error box, before any of the
+                 display guards below get a chance to run. #}
+
+              {% set rows = ns.rows | sort(attribute='rank', reverse=true) %}
 
               {% if rows %}
 

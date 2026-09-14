@@ -125,6 +125,7 @@ from unittest.mock import AsyncMock, patch  # noqa: E402
 
 from homeassistant.core import HomeAssistant  # noqa: E402
 
+from custom_components.munskankarna.api import CannotConnect  # noqa: E402
 from custom_components.munskankarna.const import (  # noqa: E402
     CONF_HISTORY_COUNT,
     CONF_KINDS,
@@ -252,3 +253,68 @@ async def test_the_current_release_still_drives_the_existing_sensors(
 
     current = coordinator.data["releases"][KIND_TILLFALLIGT]
     assert current["release"]["id"] == "t-2026-09-11"
+
+
+async def test_an_older_release_is_never_published_as_the_current_one(
+    hass: HomeAssistant,
+) -> None:
+    """Backfilling must not promote last week's release to "current".
+
+    On a first setup — or after raising the retention depth — the older
+    candidates are uncached and so get fetched. If the *newest* page fails
+    while those succeed, the head of the merged history is an older release.
+    Publishing it as `releases[kind]` unflagged would show last week's wines
+    as this week's, with nothing to indicate otherwise.
+    """
+    coordinator, _ = _history_coordinator(hass)
+
+    async def newest_is_down(self, rid: str, title: str) -> dict:  # noqa: ANN001
+        if rid == "t-2026-09-11":
+            raise CannotConnect("the current release page is down")
+        return _result(rid, rid.removeprefix("t-"))
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator,
+            "_async_fetch_index",
+            new=AsyncMock(return_value=list(WEEKLY_INDEX)),
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=newest_is_down),
+    ):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is True
+    # The older releases that did load are retained ...
+    history = coordinator.data["history"][KIND_TILLFALLIGT]
+    assert [r["release"]["id"] for r in history] == ["t-2026-09-04", "t-2026-08-28"]
+
+    # ... but the newest of them is not passed off as freshly confirmed.
+    current = coordinator.data["releases"][KIND_TILLFALLIGT]
+    assert current["release"]["id"] == "t-2026-09-04"
+    assert current.get("stale") is True, (
+        "an older release was published as the current one with no stale flag"
+    )
+
+
+async def test_a_refreshed_current_release_is_not_marked_stale(
+    hass: HomeAssistant,
+) -> None:
+    """The other side of it: a real refresh must not be flagged."""
+    coordinator, _ = _history_coordinator(hass)
+
+    async def fake_fetch(self, rid: str, title: str) -> dict:  # noqa: ANN001
+        return _result(rid, rid.removeprefix("t-"))
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator,
+            "_async_fetch_index",
+            new=AsyncMock(return_value=list(WEEKLY_INDEX)),
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
+    ):
+        await coordinator.async_refresh()
+
+    current = coordinator.data["releases"][KIND_TILLFALLIGT]
+    assert current["release"]["id"] == "t-2026-09-11"
+    assert not current.get("stale")

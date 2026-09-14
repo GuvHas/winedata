@@ -191,3 +191,56 @@ async def test_markdown_tables_render_as_tables(
                     "blank line between table rows breaks the table:\n"
                     + "\n".join(lines[max(0, i - 1) : i + 3])
                 )
+
+
+async def test_the_fynd_view_sorts_when_a_bargain_has_no_score(
+    hass: HomeAssistant, dashboard: dict
+) -> None:
+    """Jinja's sort() compares None against a float and raises.
+
+    The parser allows a scored and an unscored wine to sit in the same
+    release, and both can be Fynd. Sorting happens before the display guards,
+    so `w.score is not none` further down cannot save the card — the whole
+    thing renders as an error box. The earlier sparse fixture missed this
+    because its unscored wine was not a Fynd, so it never reached the sort.
+    """
+    entry = create_entry(
+        hass, options={CONF_KINDS: [KIND_TILLFALLIGT], CONF_TOP_COUNT: 5}
+    )
+
+    def _mixed(release_id: str) -> list[dict]:
+        scored = build_wine(release_id, "Betygsatt Fynd", 16.0, value="fynd", price=99.0)
+        unscored = build_wine(release_id, "Obetygsatt Fynd", None, value="fynd", price=89.0)
+        return [scored, unscored]
+
+    async def fake_fetch(self, rid: str, title: str) -> dict:  # noqa: ANN001
+        wines = _mixed(rid)
+        return {
+            "release": build_release(rid, KIND_TILLFALLIGT, "2026-09-11",
+                                     wine_count=len(wines)),
+            "wines": wines,
+            "warnings": [],
+            "page_valid": True,
+        }
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator,
+            "_async_fetch_index",
+            new=AsyncMock(return_value=[
+                build_release("t-2026-09-11", KIND_TILLFALLIGT, "2026-09-11")
+            ]),
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_fetch),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    combined = ""
+    for source in _templates(dashboard):
+        combined += Template(source, hass).async_render(parse_result=False)
+
+    # Both bargains are listed, and the unscored one shows a placeholder.
+    assert "Betygsatt Fynd" in combined
+    assert "Obetygsatt Fynd" in combined, "the unscored bargain was dropped"
+    assert "None" not in combined
