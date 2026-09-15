@@ -22,7 +22,9 @@ from unittest.mock import AsyncMock, patch
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 
+from custom_components.munskankarna import migrate, repairs
 from custom_components.munskankarna.const import (
     CONF_KINDS,
     DOMAIN,
@@ -206,3 +208,129 @@ async def test_already_canonical_ids_are_untouched(hass: HomeAssistant) -> None:
     ids = {e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)}
     assert "sensor.munskankarna_history" in ids
     assert not any(e.endswith("_2") for e in ids), f"the migration churned ids: {ids}"
+
+
+async def test_an_id_it_cannot_prove_is_offered_as_a_repair(hass: HomeAssistant) -> None:
+    """Entities registered under "Virtual Munskänkarna", device renamed since.
+
+    Home Assistant keeps no record of previous device names, so nothing can
+    show it generated these ids — `virtual_munskankarna_history` is equally
+    what somebody would type. They are offered rather than taken, and
+    confirming the repair renames them.
+    """
+    entry, registry = _legacy_install(hass, "Virtual Munskänkarna", "virtual_munskankarna")
+    devices = dr.async_get(hass)
+    # Looked up through the config entry, not by identifiers: identifiers stopped
+    # being unique across entries, and async_get_device raises on HA 2026.9+.
+    device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    devices.async_update_device(device.id, name_by_user="Vinkällaren")
+
+    await _run_setup(hass, entry)
+
+    # Untouched, and the reason is on offer rather than buried in a log.
+    still = {e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)}
+    assert "sensor.virtual_munskankarna_history" in still
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, migrate.issue_id(entry))
+    assert issue is not None and issue.is_fixable
+
+    flow = await repairs.async_create_fix_flow(hass, migrate.issue_id(entry), issue.data)
+    flow.hass = hass
+    form = await flow.async_step_confirm()
+    assert "sensor.virtual_munskankarna_history → sensor.munskankarna_history" in (
+        form["description_placeholders"]["entities"]
+    )
+
+    assert (await flow.async_step_confirm({}))["type"] == "create_entry"
+    after = {e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)}
+    for _suffix, (_name, canonical) in OWNED.items():
+        assert f"sensor.{canonical}" in after, f"{canonical} was not repaired"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, migrate.issue_id(entry)) is None
+
+
+async def test_the_repair_clears_when_the_registry_is_corrected(hass: HomeAssistant) -> None:
+    """Renaming by hand ends the notice; nothing reloads the entry to do it."""
+    entry, registry = _legacy_install(hass, "Virtual Munskänkarna", "virtual_munskankarna")
+    devices = dr.async_get(hass)
+    device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    devices.async_update_device(device.id, name_by_user="Vinkällaren")
+
+    await _run_setup(hass, entry)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, migrate.issue_id(entry)) is not None
+
+    for suffix, (_name, canonical) in OWNED.items():
+        registry.async_update_entity(
+            registry.async_get_entity_id("sensor", DOMAIN, f"{entry.entry_id}_{suffix}"),
+            new_entity_id=f"sensor.{canonical}",
+        )
+    await hass.async_block_till_done()
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, migrate.issue_id(entry)) is None
+
+
+async def test_an_id_it_cannot_place_is_raised_as_a_repair(hass: HomeAssistant) -> None:
+    """Silence is what left the reporter stuck twice: say so in the UI."""
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN]})
+    devices = dr.async_get(hass)
+    device = devices.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Munskänkarna",
+    )
+    devices.async_update_device(device.id, name_by_user="Vinlager")
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "sensor", DOMAIN, f"{entry.entry_id}_history",
+        suggested_object_id="vinkallare_history",
+        config_entry=entry, device_id=device.id,
+        original_name="History", has_entity_name=True,
+    )
+
+    await _run_setup(hass, entry)
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, migrate.issue_id(entry))
+    assert issue is not None, "an unplaceable id was skipped silently"
+    assert issue.data == {"entry_id": entry.entry_id}
+
+    flow = await repairs.async_create_fix_flow(hass, migrate.issue_id(entry), issue.data)
+    flow.hass = hass
+    listed = (await flow.async_step_confirm())["description_placeholders"]["entities"]
+    assert "sensor.vinkallare_history → sensor.munskankarna_history" in listed
+
+
+async def test_a_healthy_install_raises_no_repair(hass: HomeAssistant) -> None:
+    """And clears one left over from a previous run."""
+    entry, _ = _legacy_install(hass, "Munskänkarna", "munskankarna")
+    await _run_setup(hass, entry)
+
+    issues = ir.async_get(hass)
+    assert issues.async_get_issue(DOMAIN, migrate.issue_id(entry)) is None
+
+
+async def test_a_custom_id_sharing_the_generated_suffix_survives(hass: HomeAssistant) -> None:
+    """`sensor.cellar_munskankarna_history` names this entity — and is still a choice.
+
+    It is indistinguishable from what a device called "Cellar Munskänkarna"
+    would have produced, so the migration cannot prove Home Assistant made it.
+    Renaming on a guess breaks whatever referenced it, and the guess buys only
+    the clicks the repair issue already saves.
+    """
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN]})
+    devices = dr.async_get(hass)
+    device = devices.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Munskänkarna",
+    )
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "sensor", DOMAIN, f"{entry.entry_id}_history",
+        suggested_object_id="cellar_munskankarna_history",
+        config_entry=entry, device_id=device.id,
+        original_name="History", has_entity_name=True,
+    )
+
+    await _run_setup(hass, entry)
+
+    ids = {e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)}
+    assert "sensor.cellar_munskankarna_history" in ids, "a chosen id was renamed on a guess"
+    assert "sensor.munskankarna_history" not in ids

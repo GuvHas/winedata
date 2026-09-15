@@ -48,5 +48,18 @@
         }
       }
     }
+  },
+  "issues": {
+    "mismatched_entity_ids": {
+      "title": "Rename {count} Munskänkarna entity ID(s)?",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Entity IDs do not match the example dashboard",
+            "description": "These Munskänkarna entities exist and hold data, but under IDs the example dashboard does not reference, so its cards report them as unknown:\n\n{entities}\n\nThey were not renamed automatically because Home Assistant cannot be shown to have generated these IDs — you may have chosen them. Submit to rename them to the IDs after the arrows. Anything marked (taken) is skipped: another entity already holds that ID.\n\nIf you chose these IDs on purpose, close this instead and point the dashboard at the IDs you have."
+          }
+        }
+      }
+    }
   }
 }
