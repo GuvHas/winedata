@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, patch
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 
 from custom_components.munskankarna.const import (
     CONF_KINDS,
@@ -206,3 +207,61 @@ async def test_already_canonical_ids_are_untouched(hass: HomeAssistant) -> None:
     ids = {e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)}
     assert "sensor.munskankarna_history" in ids
     assert not any(e.endswith("_2") for e in ids), f"the migration churned ids: {ids}"
+
+
+async def test_an_id_from_a_device_renamed_twice_is_repaired(hass: HomeAssistant) -> None:
+    """The gap 1.1.2 left: recognising the id needed the *old* device name.
+
+    Entities registered while the device was "Virtual Munskänkarna", then the
+    device renamed again. Home Assistant keeps no record of previous device
+    names, so re-deriving from the current one no longer matches — but the id
+    still spells out the integration's own slug followed by the entity name,
+    which no other entity could mean.
+    """
+    entry, registry = _legacy_install(hass, "Virtual Munskänkarna", "virtual_munskankarna")
+    dr.async_get(hass).async_update_device(
+        dr.async_get(hass).async_get_device({(DOMAIN, entry.entry_id)}).id,
+        name_by_user="Vinkällaren",
+    )
+
+    await _run_setup(hass, entry)
+
+    after = {e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)}
+    for _suffix, (_name, canonical) in OWNED.items():
+        assert f"sensor.{canonical}" in after, f"{canonical} was not repaired"
+
+
+async def test_an_id_it_cannot_place_is_raised_as_a_repair(hass: HomeAssistant) -> None:
+    """Silence is what left the reporter stuck twice: say so in the UI."""
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN]})
+    devices = dr.async_get(hass)
+    device = devices.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Munskänkarna",
+    )
+    devices.async_update_device(device.id, name_by_user="Vinlager")
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "sensor", DOMAIN, f"{entry.entry_id}_history",
+        suggested_object_id="vinkallare_history",
+        config_entry=entry, device_id=device.id,
+        original_name="History", has_entity_name=True,
+    )
+
+    await _run_setup(hass, entry)
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"mismatched_entity_ids_{entry.entry_id}")
+    assert issue is not None, "an unplaceable id was skipped silently"
+    placeholders = issue.translation_placeholders or {}
+    assert "sensor.vinkallare_history" in placeholders.get("entities", "")
+    assert "sensor.munskankarna_history" in placeholders.get("entities", "")
+
+
+async def test_a_healthy_install_raises_no_repair(hass: HomeAssistant) -> None:
+    """And clears one left over from a previous run."""
+    entry, _ = _legacy_install(hass, "Munskänkarna", "munskankarna")
+    await _run_setup(hass, entry)
+
+    issues = ir.async_get(hass)
+    assert issues.async_get_issue(DOMAIN, f"mismatched_entity_ids_{entry.entry_id}") is None

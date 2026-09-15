@@ -2,7 +2,7 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-41BDF5.svg)](https://www.home-assistant.io/)
-[![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)](https://github.com/GuvHas/winedata/releases)
+[![Version](https://img.shields.io/badge/version-1.1.3-blue.svg)](https://github.com/GuvHas/winedata/releases)
 
 Weekly wine reviews from **Munskänkarna**, Sweden's wine society, matched to
 **Systembolaget's** catalog — on your dashboard, and available to automations.
@@ -147,19 +147,23 @@ automations depend on.
 > Upgrading to **1.1.2 renames those for you** on the next restart, logging
 > each rename at INFO.
 >
-> Ids you chose yourself are never touched, and that guarantee has a cost: an
-> id is moved only when it is *exactly* what Home Assistant would derive from
-> the device's **current** name plus the entity name. Two cases are left for
-> you to fix by hand under **Settings → Devices & Services → Entities**:
+> An id is moved when it can be placed as one Home Assistant generated — what
+> it derives from the device's current name, or anything ending in
+> `munskankarna_<entity name>`, which covers a device renamed more than once.
+> Ids you chose yourself are never touched: `sensor.min_vinkallare` matches
+> neither shape, and neither does a bare `sensor.history`.
 >
-> - **You renamed the device again afterwards.** An entity still on
->   `sensor.virtual_munskankarna_history` while the device now reads
->   *Vinkällaren* is not recognised: Home Assistant keeps no record of a
->   device's previous names, so the old id is skipped rather than guessed at.
->   Nothing appears in the log, because nothing was attempted.
-> - **Something else already holds the canonical id.** Logged at WARNING,
->   naming the entity in the way. Free that id, or point the dashboard at the
->   id you have.
+> Whatever is left over is raised under **Settings → Repairs**, naming each id
+> and what to rename it to, rather than skipped in silence. Two things end up
+> there: an id too far from either shape to attribute to Home Assistant, and
+> one whose target is already held by another entity. Fix them under
+> **Settings → Devices & Services → Entities**, or point the dashboard at the
+> ids you have and ignore the issue.
+
+Every sensor above is created when the integration loads, before any wines
+have been fetched — an empty archive reads `0`, never *unknown*. A card saying
+an entity is unknown is always an id that does not match, never data that has
+not arrived yet.
 
 A sensor exists for every tasting type you have enabled. If its release cannot
 be refreshed on a given poll, it keeps the wines from the last successful one
@@ -508,11 +512,13 @@ interval in Options; the reviews are published weekly at most.
 Home Assistant"**
 The entities exist — read the ids Home Assistant suggests in that message. If
 they carry a prefix (`sensor.virtual_munskankarna_fynd_history`), they were
-registered before 1.1.1 under a renamed device. Update to 1.1.2 and restart:
-the ids are renamed automatically, and the log records each one. An id you
-chose yourself is left alone by design, so point the dashboard at it instead.
-If the message survives the restart, the rename was skipped — the note under
-[Entities](#entities) gives the two reasons and the manual fix.
+registered before 1.1.1 under a renamed device. Update to 1.1.3 and restart:
+the ids are renamed automatically, and the log records each one.
+
+The entities are never missing for want of data — they are created empty at
+startup — so this message always means an id mismatch. If it survives the
+restart, the rename was skipped and **Settings → Repairs** names each id it
+could not place and what to rename it to.
 
 **"Detected blocking call to load_verify_locations"**
 Fixed in 1.0.1 — update the integration.

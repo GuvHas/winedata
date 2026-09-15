@@ -10,18 +10,12 @@ Those entities are not missing — they are registered under the wrong id, so
 adding "empty" ones is impossible: the unique_id is already taken and a second
 entity would only get a suffixed id. The fix is to rename what is there.
 
-The whole risk is overriding an id the *user* chose, so the migration only
-touches an id that is exactly what Home Assistant would have auto-derived when
-the entity was registered. A hand-picked id never matches that, and neither
-does an id another integration already owns.
-
-That guarantee costs coverage, deliberately. The legacy id is recognised by
-re-deriving it from the device's *current* name, and Home Assistant keeps no
-record of a device's previous names — so an entity left on
-`sensor.virtual_munskankarna_history` by a device since renamed again is
-indistinguishable from an id a person picked, and is left alone. The README
-documents that case and the manual fix; guessing at it is the one thing worse
-than leaving it.
+The whole risk is overriding an id the *user* chose, so an id is moved only
+when it can be placed as one Home Assistant produced — see `_is_auto_derived`
+— and never onto an id something else already owns. Whatever is left over is
+raised as a repair issue rather than skipped in silence, because silence is
+what makes a mismatched dashboard so hard to account for: the entity exists,
+it holds data, and nothing says why the card cannot find it.
 """
 
 from __future__ import annotations
@@ -32,11 +26,19 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import slugify
 
-from .const import DEFAULT_NAME
+from .const import DEFAULT_NAME, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+#: How the integration's own name slugs. Every device this integration creates
+#: is named `DEFAULT_NAME`, so this is the tail of every id Home Assistant has
+#: derived for it under an unrenamed device.
+_OWN_SLUG = slugify(DEFAULT_NAME)
+
+ISSUE_MISMATCHED_IDS = "mismatched_entity_ids"
 
 
 def canonical_object_id(name: str) -> str:
@@ -48,17 +50,29 @@ def canonical_object_id(name: str) -> str:
     return slugify(f"{DEFAULT_NAME} {name}")
 
 
-def _derived_object_id(entry: er.RegistryEntry, device_name: str) -> str:
-    """The one object_id Home Assistant itself could have derived for `entry`.
+def _is_auto_derived(current: str, name: str, device_name: str) -> bool:
+    """Could Home Assistant itself have produced `current` for this entity?
 
-    Every sensor this integration has ever registered set `has_entity_name`,
-    from the commit that introduced the platform onwards, so Home Assistant
-    always prefixed the device name. A bare `sensor.history` was therefore
-    never produced by any released version — only by a person — and treating
-    it as auto-derived would rewrite a deliberate id while covering no install
-    that exists.
+    Two shapes qualify, and a hand-picked id is neither.
+
+    The first is what Home Assistant derives *now*: the device's current name
+    followed by the entity name. The second covers a device renamed more than
+    once — Home Assistant keeps no record of previous device names, so the id
+    can no longer be re-derived, but it still ends in this integration's own
+    slug followed by the entity name, because the device is created as
+    "Munskänkarna" and every rename that keeps the word keeps that tail. An id
+    spelling out `…munskankarna_history` denotes this entity under any
+    reading, so moving it takes away no meaningful choice.
+
+    What stays out is the point: `sensor.min_vinkallare` matches neither, and
+    neither does a bare `sensor.history` — the integration has set
+    `has_entity_name` since the commit that introduced the sensor platform, so
+    no released version ever registered an id without a device name in front.
     """
-    return slugify(f"{device_name} {entry.original_name or ''}")
+    suffix = slugify(name)
+    return current == slugify(f"{device_name} {name}") or current.endswith(
+        f"{_OWN_SLUG}_{suffix}"
+    )
 
 
 @callback
@@ -66,24 +80,28 @@ def async_migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Move this entry's auto-derived entity ids onto their canonical form."""
     registry = er.async_get(hass)
     devices = dr.async_get(hass)
+    stragglers: list[str] = []
 
     for existing in er.async_entries_for_config_entry(registry, entry.entry_id):
-        if not existing.original_name:
+        if not (name := existing.original_name):
             continue
 
         current = existing.entity_id.partition(".")[2]
-        canonical = canonical_object_id(existing.original_name)
+        canonical = canonical_object_id(name)
         if current == canonical:
             continue
 
+        wanted = f"{existing.domain}.{canonical}"
         device = devices.async_get(existing.device_id) if existing.device_id else None
         device_name = (device.name_by_user or device.name or "") if device else ""
-        if current != _derived_object_id(existing, device_name):
-            # Home Assistant would never have produced this id, so a person
-            # did. Their choice outranks the dashboard's convenience.
+
+        if not _is_auto_derived(current, name, device_name):
+            # Home Assistant cannot be shown to have produced this id, so a
+            # person may well have. Their choice outranks the dashboard's
+            # convenience — but say so, rather than leaving them to guess.
+            stragglers.append(f"{existing.entity_id} → {wanted}")
             continue
 
-        wanted = f"{existing.domain}.{canonical}"
         if registry.async_get(wanted) is not None or hass.states.get(wanted) is not None:
             _LOGGER.warning(
                 "Leaving %s alone: %s is already taken, so the dashboard needs "
@@ -91,6 +109,7 @@ def async_migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
                 existing.entity_id,
                 wanted,
             )
+            stragglers.append(f"{existing.entity_id} → {wanted} (taken)")
             continue
 
         _LOGGER.info(
@@ -99,3 +118,30 @@ def async_migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
             wanted,
         )
         registry.async_update_entity(existing.entity_id, new_entity_id=wanted)
+
+    _async_report(hass, entry, stragglers)
+
+
+@callback
+def _async_report(hass: HomeAssistant, entry: ConfigEntry, stragglers: list[str]) -> None:
+    """Surface the ids that could not be placed, and clear the notice once none are."""
+    issue_id = f"{ISSUE_MISMATCHED_IDS}_{entry.entry_id}"
+    if not stragglers:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+
+    _LOGGER.warning(
+        "These entity ids do not match the ids the example dashboard uses: %s. "
+        "Rename them under Settings > Devices & Services > Entities, or point "
+        "the dashboard at the ids you have",
+        ", ".join(stragglers),
+    )
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=ISSUE_MISMATCHED_IDS,
+        translation_placeholders={"entities": ", ".join(stragglers)},
+    )

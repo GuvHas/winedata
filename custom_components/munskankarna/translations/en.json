@@ -48,5 +48,11 @@
         }
       }
     }
+  },
+  "issues": {
+    "mismatched_entity_ids": {
+      "title": "Entity IDs do not match the example dashboard",
+      "description": "These Munskänkarna entities exist and hold data, but under IDs the example dashboard does not reference, so its cards report them as unknown:\n\n{entities}\n\nThe IDs could not be recognised as ones Home Assistant generated, so they were left alone in case you chose them yourself. If you did, point the dashboard at the IDs you have and ignore this issue. If you did not, open each entity under Settings > Devices & services > Entities and change its ID to the one shown after the arrow."
+    }
   }
 }
