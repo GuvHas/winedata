@@ -147,18 +147,24 @@ automations depend on.
 > Upgrading to **1.1.2 renames those for you** on the next restart, logging
 > each rename at INFO.
 >
-> An id is moved when it can be placed as one Home Assistant generated — what
-> it derives from the device's current name, or anything ending in
-> `munskankarna_<entity name>`, which covers a device renamed more than once.
-> Ids you chose yourself are never touched: `sensor.min_vinkallare` matches
-> neither shape, and neither does a bare `sensor.history`.
+> An id is moved unasked only when Home Assistant can be *shown* to have made
+> it — when it is exactly what Home Assistant derives from the device's current
+> name plus the entity name. Nothing else qualifies, however much it looks the
+> part: `sensor.cellar_munskankarna_history` is what a device called *Cellar
+> Munskänkarna* would have produced and equally what somebody would type, and
+> renaming on that guess breaks whatever referenced it.
 >
-> Whatever is left over is raised under **Settings → Repairs**, naming each id
-> and what to rename it to, rather than skipped in silence. Two things end up
-> there: an id too far from either shape to attribute to Home Assistant, and
-> one whose target is already held by another entity. Fix them under
-> **Settings → Devices & Services → Entities**, or point the dashboard at the
-> ids you have and ignore the issue.
+> Everything else is **offered, not taken**. Any id that does not match is
+> raised under **Settings → Repairs**, which lists each one and the id it would
+> become, and renames them when you confirm — so a device renamed twice, whose
+> old name Home Assistant no longer records, still takes one click rather than
+> a trip through the entity settings. If you chose those ids deliberately,
+> close the issue instead and point the dashboard at the ids you have.
+>
+> An id whose target another entity already holds is listed as `(taken)` and
+> skipped either way; free that id first, or keep the one you have. The notice
+> withdraws itself as soon as nothing is mismatched, including when you rename
+> the entities by hand.
 
 Every sensor above is created when the integration loads, before any wines
 have been fetched — an empty archive reads `0`, never *unknown*. A card saying
@@ -517,8 +523,8 @@ the ids are renamed automatically, and the log records each one.
 
 The entities are never missing for want of data — they are created empty at
 startup — so this message always means an id mismatch. If it survives the
-restart, the rename was skipped and **Settings → Repairs** names each id it
-could not place and what to rename it to.
+restart, the rename needed your say-so: **Settings → Repairs** lists each id
+and the id it would become, and renames them when you confirm.
 
 **"Detected blocking call to load_verify_locations"**
 Fixed in 1.0.1 — update the integration.

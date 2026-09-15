@@ -18,7 +18,8 @@
 #                   1.1.3 or newer if Home Assistant calls these entities
 #                   unknown: it renames ids left prefixed by a renamed device
 #                   (sensor.virtual_munskankarna_...) back to the ids below,
-#                   and raises a repair issue for any it cannot place.
+#                   and offers the rest under Settings -> Repairs as a
+#                   one-click rename.
 #   HACS frontend   NONE. Every card in the active configuration below is
 #                   built into Home Assistant: markdown, glance, entities,
 #                   heading, button. Nothing to install.

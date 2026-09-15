@@ -8,6 +8,9 @@
     "@GuvHas"
   ],
   "config_flow": true,
+  "dependencies": [
+    "repairs"
+  ],
   "documentation": "https://github.com/GuvHas/winedata#readme",
   "integration_type": "service",
   "iot_class": "cloud_polling",

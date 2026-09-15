@@ -51,8 +51,15 @@
   },
   "issues": {
     "mismatched_entity_ids": {
-      "title": "Entitets-ID:n matchar inte exempelinstrumentpanelen",
-      "description": "Dessa Munskänkarna-entiteter finns och innehåller data, men med ID:n som exempelinstrumentpanelen inte refererar till, så dess kort rapporterar dem som okända:\n\n{entities}\n\nID:na kunde inte kännas igen som något Home Assistant genererat, så de lämnades orörda ifall du valt dem själv. Har du det, peka om instrumentpanelen till de ID:n du har och ignorera det här ärendet. Annars öppnar du varje entitet under Inställningar > Enheter och tjänster > Entiteter och ändrar dess ID till det som visas efter pilen."
+      "title": "Byt namn på {count} entitets-ID för Munskänkarna?",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Entitets-ID:n matchar inte exempelinstrumentpanelen",
+            "description": "Dessa Munskänkarna-entiteter finns och innehåller data, men med ID:n som exempelinstrumentpanelen inte refererar till, så dess kort rapporterar dem som okända:\n\n{entities}\n\nDe döptes inte om automatiskt eftersom det inte går att visa att Home Assistant genererat ID:na — du kan ha valt dem själv. Skicka för att byta till ID:na efter pilarna. Det som är märkt (taken) hoppas över: en annan entitet har redan det ID:t.\n\nValde du ID:na med avsikt, stäng det här i stället och peka om instrumentpanelen till de ID:n du har."
+          }
+        }
+      }
     }
   }
 }
