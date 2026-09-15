@@ -219,10 +219,11 @@ async def test_an_id_from_a_device_renamed_twice_is_repaired(hass: HomeAssistant
     which no other entity could mean.
     """
     entry, registry = _legacy_install(hass, "Virtual Munskänkarna", "virtual_munskankarna")
-    dr.async_get(hass).async_update_device(
-        dr.async_get(hass).async_get_device({(DOMAIN, entry.entry_id)}).id,
-        name_by_user="Vinkällaren",
-    )
+    devices = dr.async_get(hass)
+    # Looked up through the config entry, not by identifiers: identifiers stopped
+    # being unique across entries, and async_get_device raises on HA 2026.9+.
+    device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    devices.async_update_device(device.id, name_by_user="Vinkällaren")
 
     await _run_setup(hass, entry)
 
