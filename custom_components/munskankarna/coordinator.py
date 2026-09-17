@@ -7,6 +7,8 @@ then thin projections over that prepared shape.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from datetime import datetime, timedelta
@@ -57,6 +59,17 @@ _MAX_COOLDOWN: Final = 6 * 3600.0
 
 #: Schema version of the on-disk history cache.
 STORAGE_VERSION: Final = 1
+
+
+def _fingerprint(payload: dict[str, Any]) -> str:
+    """A stable digest of exactly what would be written.
+
+    Serialising 257 kB costs a millisecond or two once every six hours, which
+    buys skipping the write itself in the ~99% of cycles that change nothing.
+    Keys are sorted so a reordering is not mistaken for a change.
+    """
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.blake2b(encoded, digest_size=16).hexdigest()
 
 
 def history_storage_key(entry_id: str) -> str:
@@ -194,6 +207,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         #: Remembers what has already gone out on the bus, so polling every
         #: six hours does not re-announce the same week all week.
         self._announcer = Announcer(hass)
+        #: Digest of the payload last handed to the store, so an unchanged
+        #: cycle costs no write at all.
+        self._persisted: str | None = None
         hours = entry.options.get(CONF_SCAN_INTERVAL_HOURS)
         interval = timedelta(hours=hours) if hours else DEFAULT_SCAN_INTERVAL
 
@@ -293,6 +309,11 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if isinstance(releases, list) and releases
         }
         self._restored_history = restored
+        # What a cycle that changes nothing would write. Seeding it here means
+        # a restart that finds the site unchanged writes nothing at all.
+        self._persisted = _fingerprint(
+            {"history": restored, "seen": self._announcer.as_stored()}
+        )
         if restored:
             _LOGGER.debug(
                 "Restored %d retained release(s) from storage",
@@ -300,13 +321,32 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
 
     async def _async_save_history(self, history: dict[str, list[ParseResult]]) -> None:
-        """Persist the retained releases. Never fatal to an update."""
+        """Persist the retained releases, if they actually changed.
+
+        Published release pages are immutable and only the newest per kind is
+        re-read, so most cycles produce a byte-identical file. Writing it
+        anyway cost about 1 MB a day at the defaults, usually onto an SD card.
+
+        The digest covers the announcement record as well as the history, not
+        just the history: the cycle that seeds the record leaves the releases
+        untouched, and skipping that write would make every restart seed again
+        and re-announce the current week.
+        """
+        payload = {"history": history, "seen": self._announcer.as_stored()}
+        if (digest := _fingerprint(payload)) == self._persisted:
+            _LOGGER.debug("History unchanged since the last write; not rewriting")
+            return
+
         try:
-            await self._store.async_save(
-                {"history": history, "seen": self._announcer.as_stored()}
-            )
+            # Written rather than deferred: async_save already serialises and
+            # writes in an executor, so it costs the event loop nothing, and a
+            # delay would leave a window where a hard stop loses the cycle for
+            # no real gain once the unchanged cycles are skipped outright.
+            await self._store.async_save(payload)
         except Exception:  # noqa: BLE001 - failing to cache is not failing to update
             _LOGGER.warning("Could not persist the history cache", exc_info=True)
+            return
+        self._persisted = digest
 
     async def async_remove_storage(self) -> None:
         """Delete the cache when the config entry is removed."""

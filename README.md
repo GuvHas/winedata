@@ -2,7 +2,7 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-41BDF5.svg)](https://www.home-assistant.io/)
-[![Version](https://img.shields.io/badge/version-1.1.3-blue.svg)](https://github.com/GuvHas/winedata/releases)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/GuvHas/winedata/releases)
 
 Weekly wine reviews from **Munskänkarna**, Sweden's wine society, matched to
 **Systembolaget's** catalog — on your dashboard, and available to automations.
@@ -467,7 +467,9 @@ trade-off is that "three releases" reaches back further for the slower ones.
 > rows and no websocket traffic, and it survives a restart — so Home Assistant
 > restarting does not re-read release pages that cannot have changed. Published
 > release pages are treated as immutable: only the current release of each type
-> is re-read on each poll.
+> is re-read on each poll, and the file is rewritten only when its contents
+> actually changed — which, given that immutability, is about once a week per
+> tasting type rather than once every poll.
 
 ### Why the archive sometimes shows fewer wines than you configured
 
