@@ -471,6 +471,14 @@ trade-off is that "three releases" reaches back further for the slower ones.
 > actually changed — which, given that immutability, is about once a week per
 > tasting type rather than once every poll.
 
+The release index lists five releases per tasting type, which covers the
+default depth of three with room to spare. Ask for more than five and the
+integration follows that type's own page on the site to find the rest — one
+extra request, and only for a type that is actually short. If a type still has
+fewer releases published than you asked for, that is reported in the
+`warnings` attribute of `sensor.munskankarna_wines_tested` rather than quietly
+giving you a shorter archive than you configured.
+
 ### Why the archive sometimes shows fewer wines than you configured
 
 Home Assistant's recorder refuses to store a state whose attributes exceed

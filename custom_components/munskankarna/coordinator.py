@@ -390,6 +390,14 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Fetch one release page."""
         return await self._active_client().async_fetch_release(release_id, title)
 
+    def _async_more_links(self) -> dict[str, str]:
+        """Each tasting type's own page, as the last index fetch advertised."""
+        return getattr(self._api, "more_links", {}) or {}
+
+    async def _async_fetch_more(self, kind: str, url: str) -> list[ReleaseDict]:
+        """Fetch one tasting type's own page."""
+        return await self._active_client().async_fetch_kind_index(url)
+
     # -- update ------------------------------------------------------------
 
     async def _async_update_data(self) -> CoordinatorData:
@@ -428,6 +436,54 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             finally:
                 self._api = None
 
+    async def _async_deepen_index(
+        self, index: list[ReleaseDict], warnings: list[str]
+    ) -> list[ReleaseDict]:
+        """Top up any tracked kind the index lists fewer of than configured.
+
+        The index carries five releases per tasting type and then a link to
+        that type's own page, while the retention depth goes to six — so the
+        sixth release exists and was simply never seen. Following costs a
+        request, so it happens only for a kind that is actually short, which
+        at the default depth of three is none of them.
+
+        A kind still short afterwards is reported rather than quietly
+        truncated. That also covers the per-type page not parsing: the depth
+        the user asked for is not met either way, and they should know.
+        """
+        more_links = self._async_more_links()
+        # Copied, not appended to: the caller's list is not ours to grow, and
+        # a reused index would otherwise accumulate across cycles.
+        deepened = list(index)
+
+        for kind in self.kinds:
+            found = {r["id"] for r in deepened if r["kind"] == kind}
+            if len(found) >= self.history_count:
+                continue
+
+            if url := more_links.get(kind):
+                try:
+                    extra = await self._async_fetch_more(kind, url)
+                except RateLimited:
+                    # Deepening history is never worth walking into a limit.
+                    raise
+                except MunskankarnaError as err:
+                    _LOGGER.warning("Could not read the page for %s: %s", kind, err)
+                    warnings.append(f"{kind}: could not read the tasting type's page: {err}")
+                    extra = []
+                for release in extra:
+                    if release["kind"] == kind and release["id"] not in found:
+                        deepened.append(release)
+                        found.add(release["id"])
+
+            if len(found) < self.history_count:
+                warnings.append(
+                    f"{kind}: Munskänkarna lists {len(found)} release(s), fewer than "
+                    f"the {self.history_count} configured"
+                )
+
+        return deepened
+
     async def _async_collect(self) -> CoordinatorData:
         """Fetch the index and every configured release using the active client."""
         try:
@@ -440,6 +496,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         except MunskankarnaError as err:
             raise UpdateFailed(f"Could not fetch the Munskänkarna release index: {err}") from err
 
+        index_warnings: list[str] = []
+        index = await self._async_deepen_index(index, index_warnings)
+
         wanted = newest_releases_per_kind(index, self.kinds, self.history_count)
         if not wanted:
             raise UpdateFailed(
@@ -449,7 +508,7 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         releases: dict[str, ParseResult] = {}
         history: dict[str, list[ParseResult]] = {}
-        warnings: list[str] = []
+        warnings: list[str] = list(index_warnings)
         #: What the previous cycle published, so a kind that cannot be
         #: refreshed keeps what it had rather than vanishing from the snapshot.
         previous: dict[str, ParseResult] = (self.data or {}).get("releases", {})
