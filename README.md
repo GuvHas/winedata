@@ -136,6 +136,16 @@ All entities are grouped under one **Munskänkarna** device.
 | `sensor.munskankarna_wines_tested` | total wines | `warnings` |
 | `sensor.munskankarna_history` | releases retained | `releases` — the whole archive, wines included |
 | `sensor.munskankarna_fynd_history` | *Fynd* across the archive | `per_kind` |
+| `sensor.munskankarna_median_score` | median score, current releases | `sample_size` |
+| `sensor.munskankarna_median_price_per_litre` | median kr/l | `sample_size` |
+| `sensor.munskankarna_fynd_share` | % of wines that are *Fynd* | `sample_size` |
+
+The last three are plain numbers, recorded as measurements, so Home Assistant
+graphs them over time with the built-in history card — no HACS card needed.
+They are what makes a price-to-score trend chartable: the wine lists live in
+attributes, and attributes are not state history. A figure over no wines reads
+*unknown* rather than zero, so a week with no data leaves a gap in the chart
+instead of a false trough.
 
 Entity ids are pinned to the integration's own name, so renaming the device in
 the UI changes what you *see* without changing the ids your dashboards and

@@ -36,6 +36,11 @@ EXPECTED_ENTITY_IDS = {
     "sensor.munskankarna_wines_tested",
     "sensor.munskankarna_history",
     "sensor.munskankarna_fynd_history",
+    # Recorder-graphable scalars; the wine lists live in attributes, which are
+    # not state history.
+    "sensor.munskankarna_median_score",
+    "sensor.munskankarna_median_price_per_litre",
+    "sensor.munskankarna_fynd_share",
     "sensor.munskankarna_tillfalligt_sortiment",
     "sensor.munskankarna_hitlista",
 }
