@@ -20,6 +20,7 @@ rules keep that from happening, and the second is what makes it robust:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -33,6 +34,20 @@ from .const import (
 from .parser import ParseResult
 
 _LOGGER = logging.getLogger(__name__)
+
+
+#: One queued announcement: the event type and its payload.
+type Event = tuple[str, dict[str, Any]]
+
+
+@dataclass(slots=True)
+class Pending:
+    """What one cycle recorded, and everything needed to undo it."""
+
+    events: list[Event] = field(default_factory=list)
+    releases: list[str] = field(default_factory=list)
+    wines: list[str] = field(default_factory=list)
+    marks_before: dict[str, str] = field(default_factory=dict)
 
 
 def _remember(record: dict[str, None], key: str, cap: int) -> None:
@@ -53,8 +68,13 @@ class Announcer:
         self._hass = hass
         self._releases: dict[str, None] = {}
         self._wines: dict[str, None] = {}
-        #: The newest release date recorded. Anything older is history.
-        self._high_water: str | None = None
+        #: The newest release date recorded, per kind. Anything older is
+        #: history. Per kind rather than global because the categories publish
+        #: on very different schedules: one global mark lets a weekly release
+        #: dated later rule out a monthly one that is genuinely new, and the
+        #: monthly release's ids are recorded either way, so it would never be
+        #: announced at all.
+        self._high_water: dict[str, str] = {}
         #: False until a record exists to compare against.
         self._armed = False
 
@@ -80,8 +100,18 @@ class Announcer:
 
         self._releases = dict.fromkeys(str(r) for r in releases[-MAX_SEEN_RELEASES:])
         self._wines = dict.fromkeys(str(w) for w in wines[-MAX_SEEN_WINES:])
+
+        # A record written before the mark was split per kind carries a single
+        # string. It is dropped rather than applied to every kind, which would
+        # reproduce the cross-category suppression it is being replaced for.
+        # The marks rebuild on the first cycle, and the seen set — intact
+        # across the upgrade — is what actually keeps history quiet meanwhile.
         high_water = stored.get("high_water")
-        self._high_water = high_water if isinstance(high_water, str) else None
+        self._high_water = (
+            {str(k): str(v) for k, v in high_water.items()}
+            if isinstance(high_water, dict)
+            else {}
+        )
         self._armed = True
 
     def as_stored(self) -> dict[str, Any]:
@@ -92,63 +122,93 @@ class Announcer:
             "high_water": self._high_water,
         }
 
-    def _is_news(self, date: str | None) -> bool:
-        """Whether a release of this date could still be new.
+    def _is_news(self, kind: str, date: str | None) -> bool:
+        """Whether a release of this kind and date could still be new.
 
         An unknown date cannot be ruled out, so it falls through to the
-        record; a date behind the high-water mark is history whatever the
-        record says.
+        record; a date behind this kind's high-water mark is history whatever
+        the record says.
         """
-        if date is None or self._high_water is None:
+        mark = self._high_water.get(kind)
+        if date is None or mark is None:
             return True
-        return date >= self._high_water
+        return date >= mark
 
     @callback
-    def async_announce(self, history: dict[str, list[ParseResult]]) -> int:
-        """Fire for everything new and return how many events went out.
+    def async_collect(self, history: dict[str, list[ParseResult]]) -> Pending:
+        """Record what is new and return the events, without firing them.
+
+        Recording and dispatch are separate on purpose. The record has to
+        reach disk before anything is announced: fire first and a stop — or a
+        write failure, which the save helper swallows by design — leaves the
+        events sent and the record behind them missing, so a restart announces
+        the same week all over again.
 
         Imported here rather than at module scope: `sensor` imports the
         package root, which imports the coordinator, which imports this.
         """
         from .sensor import wine_summary
 
-        armed, fired = self._armed, 0
+        armed = self._armed
+        pending = Pending(marks_before=dict(self._high_water))
 
         for kind, results in history.items():
             # Oldest first, so a burst reads in publication order.
             for result in reversed(results):
                 release = result["release"]
                 release_id, date = release["id"], release.get("date")
-                news = armed and self._is_news(date)
+                news = armed and self._is_news(kind, date)
 
                 if release_id not in self._releases:
                     if news:
-                        self._fire_release(kind, result)
-                        fired += 1
+                        pending.events.append(self._release_event(kind, result))
                     _remember(self._releases, release_id, MAX_SEEN_RELEASES)
+                    pending.releases.append(release_id)
 
                 for wine in result["wines"]:
                     if wine["id"] in self._wines:
                         continue
                     if news:
-                        self._fire_wine(kind, result, wine_summary(wine))
-                        fired += 1
+                        pending.events.append(
+                            self._wine_event(kind, result, wine_summary(wine))
+                        )
                     _remember(self._wines, wine["id"], MAX_SEEN_WINES)
+                    pending.wines.append(wine["id"])
 
-                if date is not None and (
-                    self._high_water is None or date > self._high_water
-                ):
-                    self._high_water = date
+                mark = self._high_water.get(kind)
+                if date is not None and (mark is None or date > mark):
+                    self._high_water[kind] = date
 
         if not armed:
             _LOGGER.debug("Seeded the announcement record; nothing announced")
         self._armed = True
-        return fired
+        return pending
 
     @callback
-    def _fire_release(self, kind: str, result: ParseResult) -> None:
+    def async_dispatch(self, pending: Pending) -> int:
+        """Fire what `async_collect` recorded, once the record is on disk."""
+        for event_type, payload in pending.events:
+            self._hass.bus.async_fire(event_type, payload)
+        return len(pending.events)
+
+    @callback
+    def async_rollback(self, pending: Pending) -> None:
+        """Forget what was recorded, so the next cycle offers it again.
+
+        Used when the record could not be persisted. Without it the ids stay
+        marked seen in memory and the events are never announced at all —
+        deferring them to the next cycle is the honest outcome.
+        """
+        for release_id in pending.releases:
+            self._releases.pop(release_id, None)
+        for wine_id in pending.wines:
+            self._wines.pop(wine_id, None)
+        self._high_water = pending.marks_before
+
+    @callback
+    def _release_event(self, kind: str, result: ParseResult) -> Event:
         release = result["release"]
-        self._hass.bus.async_fire(
+        return (
             EVENT_RELEASE_PUBLISHED,
             {
                 "kind": kind,
@@ -162,11 +222,11 @@ class Announcer:
         )
 
     @callback
-    def _fire_wine(
+    def _wine_event(
         self, kind: str, result: ParseResult, summary: dict[str, Any]
-    ) -> None:
+    ) -> Event:
         release = result["release"]
-        self._hass.bus.async_fire(
+        return (
             EVENT_WINE_RELEASED,
             {
                 "kind": kind,

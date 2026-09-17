@@ -116,3 +116,33 @@ async def test_a_kind_that_is_still_short_is_reported(hass: HomeAssistant) -> No
     )
     # Short is not broken: whatever was found is still retained and published.
     assert len(coordinator.data["history"][KIND_TILLFALLIGT]) == 3
+
+
+def test_a_more_link_off_the_configured_site_is_dropped() -> None:
+    """These URLs get fetched, so the index must not be able to redirect us.
+
+    An absolute href in scraped markup would otherwise send `fetch_text` at
+    whatever host it names — including the Home Assistant host's own network.
+    """
+    hostile = (
+        '<h3>Hitlista</h3>'
+        '<a href="http://127.0.0.1:8123/sv/vinlocus/private">Visa fler från Hitlista</a>'
+    )
+    assert parse_more_links(hostile, DEFAULT_BASE_URL) == {}
+
+    scripted = (
+        '<h3>Hitlista</h3>'
+        '<a href="javascript:alert(1)/sv/vinlocus/x">Visa fler från Hitlista</a>'
+    )
+    assert parse_more_links(scripted, DEFAULT_BASE_URL) == {}
+
+
+def test_a_relative_more_link_still_resolves() -> None:
+    """The guard must not throw out the links that actually exist."""
+    ok = (
+        '<h3>Hitlista</h3>'
+        '<a href="/sv/vinlocus/provningstyp/hitlistan">Visa fler från Hitlista</a>'
+    )
+    assert parse_more_links(ok, DEFAULT_BASE_URL) == {
+        "hitlistan": f"{DEFAULT_BASE_URL}/sv/vinlocus/provningstyp/hitlistan"
+    }

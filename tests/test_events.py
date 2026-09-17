@@ -206,3 +206,85 @@ async def test_the_record_survives_a_restart(hass: HomeAssistant) -> None:
         await restarted.async_refresh()
 
     assert wines == [], "a restart re-announced wines already seen"
+
+
+async def test_one_category_cannot_silence_another(hass: HomeAssistant) -> None:
+    """Categories publish on different schedules; a shared high-water mark breaks that.
+
+    A weekly release dated later than a monthly one is processed first, and a
+    single global mark then rules the monthly release out as history — while
+    still recording its ids, so it is never announced at all.
+    """
+    from custom_components.munskankarna.const import KIND_HITLISTAN
+
+    entry = create_entry(
+        hass,
+        options={CONF_KINDS: [KIND_TILLFALLIGT, KIND_HITLISTAN], CONF_HISTORY_COUNT: 2},
+    )
+    coordinator = MunskankarnaCoordinator(hass, entry)
+
+    weekly_old = build_release("t-2026-09-04", KIND_TILLFALLIGT, "2026-09-04")
+    monthly_old = build_release("h-2026-08-20", KIND_HITLISTAN, "2026-08-20")
+    weekly_new = build_release("t-2026-09-18", KIND_TILLFALLIGT, "2026-09-18")
+    monthly_new = build_release("h-2026-09-15", KIND_HITLISTAN, "2026-09-15")
+
+    index = [weekly_old, monthly_old]
+
+    async def fake_index(self) -> list[dict[str, Any]]:  # noqa: ANN001
+        return list(index)
+
+    async def fake_release(self, rid: str, title: str) -> dict:  # noqa: ANN001
+        kind = KIND_TILLFALLIGT if rid.startswith("t-") else KIND_HITLISTAN
+        return {
+            "release": build_release(rid, kind, rid[2:], wine_count=1),
+            "wines": [build_wine(rid, f"Vin {rid}")],
+            "warnings": [],
+            "page_valid": True,
+        }
+
+    with (
+        patch.object(MunskankarnaCoordinator, "_async_fetch_index", new=fake_index),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_release),
+    ):
+        await coordinator.async_load_history()
+        await coordinator.async_refresh()
+
+        releases = async_capture_events(hass, EVENT_RELEASE_PUBLISHED)
+        index[:] = [weekly_new, weekly_old, monthly_new, monthly_old]
+        await coordinator.async_refresh()
+
+    announced = {e.data["release_id"] for e in releases}
+    assert announced == {"t-2026-09-18", "h-2026-09-15"}, (
+        f"the later weekly release silenced the monthly one: {announced}"
+    )
+
+
+async def test_nothing_is_announced_if_the_record_cannot_be_persisted(
+    hass: HomeAssistant,
+) -> None:
+    """Announcing before the record is durable means announcing twice.
+
+    The save helper swallows write failures on purpose, so a failed write is
+    silent — and after a restart the old record would make these wines news
+    all over again.
+    """
+    coordinator, _ = _coordinator(hass)
+    wines = async_capture_events(hass, EVENT_WINE_RELEASED)
+
+    site = _Site([WEEK_2], {"t-2026-09-04": ["Ett Till"]})
+    with site.patches()[0], site.patches()[1]:
+        await coordinator.async_load_history()
+        await coordinator.async_refresh()
+
+        site.index = [WEEK_3, WEEK_2]
+        site.pages["t-2026-09-11"] = ["Nytt Vin"]
+        with patch.object(
+            coordinator._store, "async_save", side_effect=OSError("disk full")
+        ):
+            await coordinator.async_refresh()
+        assert wines == [], "announced a wine whose record was never written"
+
+        # The next cycle writes, so the wine is announced then — deferred, not lost.
+        await coordinator.async_refresh()
+
+    assert [e.data["name"] for e in wines] == ["Nytt Vin"]

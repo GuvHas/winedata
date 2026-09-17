@@ -472,15 +472,21 @@ def parse_more_links(html: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, s
         text = clean(anchor.get_text())
         if not text.lower().startswith("visa fler"):
             continue
-        href = anchor.get("href")
-        if not href or "/vinlocus/" not in href:
+
+        # These URLs are fetched, not merely rendered, so the same-origin and
+        # scheme checks every other scraped link goes through are not optional
+        # here — an absolute href would otherwise point the client at any host
+        # it names, the Home Assistant machine's own network included.
+        resolved = safe_url(anchor.get("href"), base_url)
+        if not resolved or "/vinlocus/" not in resolved:
             continue
+
         heading = anchor.find_previous(["h2", "h3"])
         if heading is None:
             continue
         kind, _label = parse_assortment_kind(clean(heading.get_text()))
         if kind and kind not in links:
-            links[kind] = urljoin(base_url, href)
+            links[kind] = resolved
 
     return links
 

@@ -320,8 +320,8 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 sum(len(v) for v in restored.values()),
             )
 
-    async def _async_save_history(self, history: dict[str, list[ParseResult]]) -> None:
-        """Persist the retained releases, if they actually changed.
+    async def _async_save_history(self, history: dict[str, list[ParseResult]]) -> bool:
+        """Persist the retained releases if they changed; say whether they are on disk.
 
         Published release pages are immutable and only the newest per kind is
         re-read, so most cycles produce a byte-identical file. Writing it
@@ -335,7 +335,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         payload = {"history": history, "seen": self._announcer.as_stored()}
         if (digest := _fingerprint(payload)) == self._persisted:
             _LOGGER.debug("History unchanged since the last write; not rewriting")
-            return
+            # Unchanged means what is on disk already says this, so the caller
+            # can announce: there is nothing here a restart would lose.
+            return True
 
         try:
             # Written rather than deferred: async_save already serialises and
@@ -345,8 +347,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             await self._store.async_save(payload)
         except Exception:  # noqa: BLE001 - failing to cache is not failing to update
             _LOGGER.warning("Could not persist the history cache", exc_info=True)
-            return
+            return False
         self._persisted = digest
+        return True
 
     async def async_remove_storage(self) -> None:
         """Delete the cache when the config entry is removed."""
@@ -621,12 +624,17 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if kind not in history and (carried_history := previous_history.get(kind)):
                 history[kind] = carried_history
 
-        # Before the save, so the record of what went out is persisted by the
-        # same write. Announcing after it would risk firing twice for a week
-        # if the process stopped in between.
-        self._announcer.async_announce(history)
-
-        await self._async_save_history(history)
+        # Recorded, persisted, then announced — in that order. Firing first
+        # would leave the events sent and the record behind them missing if
+        # the write failed or the process stopped, and a restart would then
+        # announce the same week again. A write that fails rolls the record
+        # back so the next cycle offers the same wines rather than swallowing
+        # them.
+        pending = self._announcer.async_collect(history)
+        if await self._async_save_history(history):
+            self._announcer.async_dispatch(pending)
+        else:
+            self._announcer.async_rollback(pending)
 
         return CoordinatorData(
             releases=releases,
