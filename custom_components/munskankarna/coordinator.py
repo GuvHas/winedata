@@ -39,6 +39,7 @@ from .const import (
     VALUE_FYND,
     VALUE_ORDER,
 )
+from .events import Announcer
 from .parser import ParseResult, ReleaseDict, WineDict
 
 _LOGGER = logging.getLogger(__name__)
@@ -190,6 +191,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         #: History read back from disk, used until the first cycle replaces it.
         self._restored_history: dict[str, list[ParseResult]] = {}
+        #: Remembers what has already gone out on the bus, so polling every
+        #: six hours does not re-announce the same week all week.
+        self._announcer = Announcer(hass)
         hours = entry.options.get(CONF_SCAN_INTERVAL_HOURS)
         interval = timedelta(hours=hours) if hours else DEFAULT_SCAN_INTERVAL
 
@@ -272,6 +276,11 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                             exc_info=True)
             return
 
+        # Restored before the history is validated: a cache whose shape went
+        # bad must not also wipe the record of what was already announced,
+        # which would make the next cycle announce the refetch.
+        self._announcer.restore((stored or {}).get("seen"))
+
         history = (stored or {}).get("history")
         if not isinstance(history, dict):
             if history is not None:
@@ -293,7 +302,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
     async def _async_save_history(self, history: dict[str, list[ParseResult]]) -> None:
         """Persist the retained releases. Never fatal to an update."""
         try:
-            await self._store.async_save({"history": history})
+            await self._store.async_save(
+                {"history": history, "seen": self._announcer.as_stored()}
+            )
         except Exception:  # noqa: BLE001 - failing to cache is not failing to update
             _LOGGER.warning("Could not persist the history cache", exc_info=True)
 
@@ -510,6 +521,11 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 releases[kind] = {**carried, "stale": True}
             if kind not in history and (carried_history := previous_history.get(kind)):
                 history[kind] = carried_history
+
+        # Before the save, so the record of what went out is persisted by the
+        # same write. Announcing after it would risk firing twice for a week
+        # if the process stopped in between.
+        self._announcer.async_announce(history)
 
         await self._async_save_history(history)
 

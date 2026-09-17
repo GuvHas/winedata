@@ -28,6 +28,7 @@ a bargain is one tap from the Systembolaget page.
 - [Configuration](#configuration)
 - [Entities](#entities)
 - [Dashboard examples](#dashboard-examples)
+- [Events](#events)
 - [Automations](#automations)
 - [Services](#services)
 - [MQTT bridge](#mqtt-bridge-optional)
@@ -329,6 +330,27 @@ tap_action:
 > The dashboard's templates are rendered against live entity state in the test
 > suite, so they cannot drift from the attributes they read.
 
+## Events
+
+The integration fires two events on the Home Assistant bus. It sends no
+notifications of its own — Home Assistant already owns delivery, targeting and
+quiet hours, so these are the primitive your automations route.
+
+| Event | Fires | Data |
+|---|---|---|
+| `munskankarna_wine_released` | once per newly reviewed wine | `kind`, `kind_label`, `release_id`, `release_date`, plus every field of a `wines` entry |
+| `munskankarna_release_published` | once per new release | `kind`, `kind_label`, `release_id`, `title`, `date`, `url`, `wine_count` |
+
+Each wine is announced once, ever. Within a release they arrive best-first, so
+an automation acting on the first event gets the best wine.
+
+> [!NOTE]
+> Nothing is announced for wines that were already there when you installed or
+> upgraded. The first poll with no record to compare against seeds quietly, and
+> nothing dated before the newest release on record is announced afterwards —
+> so raising **Releases kept per type** backfills older weeks without notifying
+> you about them.
+
 ## Automations
 
 Notify when a genuine bargain lands:
@@ -337,27 +359,45 @@ Notify when a genuine bargain lands:
 automation:
   - alias: "Wine: notify on a high-scoring Fynd"
     triggers:
-      - trigger: state
-        entity_id: sensor.munskankarna_tillfalligt_sortiment
+      - trigger: event
+        event_type: munskankarna_wine_released
     conditions:
       - condition: template
         value_template: >-
-          {{ state_attr('sensor.munskankarna_tillfalligt_sortiment','wines')
-             | selectattr('value','eq','fynd')
-             | selectattr('score','ge',15)
-             | selectattr('price','le',150)
-             | list | count > 0 }}
+          {{ trigger.event.data.value == 'fynd'
+             and (trigger.event.data.score or 0) >= 15
+             and (trigger.event.data.price or 9999) <= 150 }}
     actions:
       - action: notify.mobile_app
         data:
           title: "Veckans vinfynd 🍷"
           message: >-
-            {% set picks = state_attr('sensor.munskankarna_tillfalligt_sortiment','wines')
-               | selectattr('value','eq','fynd')
-               | selectattr('score','ge',15)
-               | selectattr('price','le',150) | list %}
-            {% for w in picks %}{{ w.name }} — {{ w.score }}/20, {{ w.price }} kr
-            {% endfor %}
+            {{ trigger.event.data.name }} — {{ trigger.event.data.score }}/20,
+            {{ trigger.event.data.price }} kr
+          data:
+            url: "{{ trigger.event.data.url }}"
+```
+
+Because the event fires once per wine, this notifies once — not on every poll
+for as long as the wine stays in the release.
+
+Light something up when an exceptional wine is released:
+
+```yaml
+automation:
+  - alias: "Wine: flash the rack on an exceptional score"
+    triggers:
+      - trigger: event
+        event_type: munskankarna_wine_released
+    conditions:
+      - "{{ (trigger.event.data.score or 0) >= 18 }}"
+    actions:
+      - action: light.turn_on
+        target:
+          entity_id: light.wine_rack
+        data:
+          rgb_color: [130, 20, 40]
+          effect: pulse
 ```
 
 ## Services

@@ -60,6 +60,19 @@ MAX_SUMMARY_LENGTH: Final = 280
 #: already removed. Bounding it is the cheaper half of that fix.
 MAX_TITLE_LENGTH: Final = 120
 
+#: Events fired on the Home Assistant bus when new material appears. The
+#: integration publishes no notifications of its own: these are the primitive
+#: an automation or a blueprint routes wherever the user wants it.
+EVENT_WINE_RELEASED: Final = f"{DOMAIN}_wine_released"
+EVENT_RELEASE_PUBLISHED: Final = f"{DOMAIN}_release_published"
+
+#: How many announced ids are remembered, so a poll cannot re-announce a week
+#: it already covered. Bounded because the record is persisted; correctness
+#: does not rest on the size, since nothing older than the newest release
+#: already recorded is announced at all.
+MAX_SEEN_RELEASES: Final = 200
+MAX_SEEN_WINES: Final = 2000
+
 MAX_ATTRIBUTE_BYTES: Final = 16384
 
 #: How much of that an integration may actually spend. Home Assistant injects
