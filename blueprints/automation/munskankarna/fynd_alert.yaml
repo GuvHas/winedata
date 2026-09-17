@@ -1,0 +1,149 @@
+blueprint:
+  name: "Munskänkarna: notify on a bargain"
+  description: >-
+    Notify when Munskänkarna reviews a wine worth buying.
+
+    Fires on the `munskankarna_wine_released` event, so each wine notifies once
+    when it is first reviewed — not again on every poll for as long as it stays
+    in the release. Leave a filter at its default to ignore it.
+  domain: automation
+  homeassistant:
+    min_version: "2024.12.0"
+  source_url: https://github.com/GuvHas/winedata/blob/main/blueprints/automation/munskankarna/fynd_alert.yaml
+  input:
+    what_counts:
+      name: What counts as worth telling you about
+      icon: mdi:tag-heart
+      collapsed: false
+      input:
+        bargains_only:
+          name: Bargains only
+          description: >-
+            Only notify for wines Munskänkarna marks as *Fynd*. Turn this off
+            to judge on score and price alone.
+          default: true
+          selector:
+            boolean:
+        min_score:
+          name: Minimum score
+          description: Munskänkarna's 20-point scale. 0 accepts any score, including unrated wines.
+          default: 15
+          selector:
+            number:
+              min: 0
+              max: 20
+              step: 0.5
+              mode: slider
+        max_price:
+          name: Maximum price
+          description: In SEK. 0 accepts any price, including wines with no price listed.
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 2000
+              step: 10
+              unit_of_measurement: kr
+              mode: box
+    narrow_it_down:
+      name: Narrow it down
+      icon: mdi:filter-variant
+      collapsed: true
+      input:
+        kinds:
+          name: Tasting types
+          description: Leave empty for every type the integration tracks.
+          default: []
+          selector:
+            select:
+              multiple: true
+              options:
+                - label: Tillfälligt sortiment
+                  value: tillfalligt-sortiment
+                - label: Fast sortiment
+                  value: fast-sortiment
+                - label: Hitlista
+                  value: hitlistan
+                - label: Lokalt och småskaligt
+                  value: lokalt-och-smaskaligt
+                - label: Ordervaror på Systembolaget
+                  value: bestallningssortimentet
+                - label: Webbhandlare
+                  value: webbviner
+                - label: Temaprovning
+                  value: temaprovning
+        colors:
+          name: Colours
+          description: Leave empty for every colour.
+          default: []
+          selector:
+            select:
+              multiple: true
+              options:
+                - label: Rött
+                  value: red
+                - label: Vitt
+                  value: white
+                - label: Rosé
+                  value: rose
+                - label: Mousserande
+                  value: sparkling
+                - label: Starkvin
+                  value: fortified
+                - label: Dessertvin
+                  value: dessert
+    delivery:
+      name: Delivery
+      icon: mdi:cellphone-message
+      collapsed: false
+      input:
+        notify_action:
+          name: Notify service
+          description: For example `notify.mobile_app_din_telefon`.
+          default: notify.persistent_notification
+          selector:
+            text:
+        title:
+          name: Title
+          default: "Veckans vinfynd 🍷"
+          selector:
+            text:
+
+mode: queued
+max: 25
+max_exceeded: silent
+
+triggers:
+  - trigger: event
+    event_type: munskankarna_wine_released
+
+variables:
+  bargains_only: !input bargains_only
+  min_score: !input min_score
+  max_price: !input max_price
+  kinds: !input kinds
+  colors: !input colors
+  wine: "{{ trigger.event.data }}"
+
+conditions:
+  # A missing score or price fails a filter that was set, and passes one left
+  # at its default — the parser allows either to be absent.
+  - condition: template
+    value_template: >-
+      {{ (not bargains_only or wine.value == 'fynd')
+         and (min_score == 0 or (wine.score is not none and wine.score >= min_score))
+         and (max_price == 0 or (wine.price is not none and wine.price <= max_price))
+         and (kinds | count == 0 or wine.kind in kinds)
+         and (colors | count == 0 or wine.color in colors) }}
+
+actions:
+  - action: !input notify_action
+    data:
+      title: !input title
+      message: >-
+        {{ wine.name }}{% if wine.vintage %} {{ wine.vintage }}{% endif %} —
+        {% if wine.score is not none %}{{ wine.score }}/20{% else %}obetygsatt{% endif %}
+        {%- if wine.price is not none %}, {{ wine.price | round(0) }} kr{% endif %}
+        {%- if wine.producer %} ({{ wine.producer }}){% endif %}
+      data:
+        url: "{{ wine.url or wine.review_url }}"

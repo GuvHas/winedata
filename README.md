@@ -363,6 +363,26 @@ an automation acting on the first event gets the best wine.
 
 ## Automations
 
+### The bargain blueprint
+
+A ready-made automation ships in the repo: **Munskänkarna: notify on a
+bargain**. Filters for bargains-only, minimum score, maximum price, tasting
+types and colours; leave any of them at its default to ignore it.
+
+[**Import it into Home Assistant**](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FGuvHas%2Fwinedata%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fmunskankarna%2Ffynd_alert.yaml) — or Settings → Automations & scenes
+→ Blueprints → Import blueprint, and paste:
+
+```
+https://github.com/GuvHas/winedata/blob/main/blueprints/automation/munskankarna/fynd_alert.yaml
+```
+
+> [!NOTE]
+> Home Assistant cannot auto-install a custom integration's blueprints, so
+> this is imported by URL rather than appearing on its own. The import keeps
+> the source URL, so re-importing the same link updates your copy.
+
+### By hand
+
 Notify when a genuine bargain lands:
 
 ```yaml
