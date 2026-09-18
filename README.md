@@ -2,7 +2,7 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-41BDF5.svg)](https://www.home-assistant.io/)
-[![Version](https://img.shields.io/badge/version-1.1.3-blue.svg)](https://github.com/GuvHas/winedata/releases)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/GuvHas/winedata/releases)
 
 Weekly wine reviews from **Munskänkarna**, Sweden's wine society, matched to
 **Systembolaget's** catalog — on your dashboard, and available to automations.
@@ -28,6 +28,7 @@ a bargain is one tap from the Systembolaget page.
 - [Configuration](#configuration)
 - [Entities](#entities)
 - [Dashboard examples](#dashboard-examples)
+- [Events](#events)
 - [Automations](#automations)
 - [Services](#services)
 - [MQTT bridge](#mqtt-bridge-optional)
@@ -135,6 +136,16 @@ All entities are grouped under one **Munskänkarna** device.
 | `sensor.munskankarna_wines_tested` | total wines | `warnings` |
 | `sensor.munskankarna_history` | releases retained | `releases` — the whole archive, wines included |
 | `sensor.munskankarna_fynd_history` | *Fynd* across the archive | `per_kind` |
+| `sensor.munskankarna_median_score` | median score, current releases | `sample_size` |
+| `sensor.munskankarna_median_price_per_litre` | median kr/l | `sample_size` |
+| `sensor.munskankarna_fynd_share` | % of wines that are *Fynd* | `sample_size` |
+
+The last three are plain numbers, recorded as measurements, so Home Assistant
+graphs them over time with the built-in history card — no HACS card needed.
+They are what makes a price-to-score trend chartable: the wine lists live in
+attributes, and attributes are not state history. A figure over no wines reads
+*unknown* rather than zero, so a week with no data leaves a gap in the chart
+instead of a false trough.
 
 Entity ids are pinned to the integration's own name, so renaming the device in
 the UI changes what you *see* without changing the ids your dashboards and
@@ -329,7 +340,48 @@ tap_action:
 > The dashboard's templates are rendered against live entity state in the test
 > suite, so they cannot drift from the attributes they read.
 
+## Events
+
+The integration fires two events on the Home Assistant bus. It sends no
+notifications of its own — Home Assistant already owns delivery, targeting and
+quiet hours, so these are the primitive your automations route.
+
+| Event | Fires | Data |
+|---|---|---|
+| `munskankarna_wine_released` | once per newly reviewed wine | `kind`, `kind_label`, `release_id`, `release_date`, plus every field of a `wines` entry |
+| `munskankarna_release_published` | once per new release | `kind`, `kind_label`, `release_id`, `title`, `date`, `url`, `wine_count` |
+
+Each wine is announced once, ever. Within a release they arrive best-first, so
+an automation acting on the first event gets the best wine.
+
+> [!NOTE]
+> Nothing is announced for wines that were already there when you installed or
+> upgraded. The first poll with no record to compare against seeds quietly, and
+> nothing dated before the newest release on record is announced afterwards —
+> so raising **Releases kept per type** backfills older weeks without notifying
+> you about them.
+
 ## Automations
+
+### The bargain blueprint
+
+A ready-made automation ships in the repo: **Munskänkarna: notify on a
+bargain**. Filters for bargains-only, minimum score, maximum price, tasting
+types and colours; leave any of them at its default to ignore it.
+
+[**Import it into Home Assistant**](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FGuvHas%2Fwinedata%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fmunskankarna%2Ffynd_alert.yaml) — or Settings → Automations & scenes
+→ Blueprints → Import blueprint, and paste:
+
+```
+https://github.com/GuvHas/winedata/blob/main/blueprints/automation/munskankarna/fynd_alert.yaml
+```
+
+> [!NOTE]
+> Home Assistant cannot auto-install a custom integration's blueprints, so
+> this is imported by URL rather than appearing on its own. The import keeps
+> the source URL, so re-importing the same link updates your copy.
+
+### By hand
 
 Notify when a genuine bargain lands:
 
@@ -337,27 +389,45 @@ Notify when a genuine bargain lands:
 automation:
   - alias: "Wine: notify on a high-scoring Fynd"
     triggers:
-      - trigger: state
-        entity_id: sensor.munskankarna_tillfalligt_sortiment
+      - trigger: event
+        event_type: munskankarna_wine_released
     conditions:
       - condition: template
         value_template: >-
-          {{ state_attr('sensor.munskankarna_tillfalligt_sortiment','wines')
-             | selectattr('value','eq','fynd')
-             | selectattr('score','ge',15)
-             | selectattr('price','le',150)
-             | list | count > 0 }}
+          {{ trigger.event.data.value == 'fynd'
+             and (trigger.event.data.score or 0) >= 15
+             and (trigger.event.data.price or 9999) <= 150 }}
     actions:
       - action: notify.mobile_app
         data:
           title: "Veckans vinfynd 🍷"
           message: >-
-            {% set picks = state_attr('sensor.munskankarna_tillfalligt_sortiment','wines')
-               | selectattr('value','eq','fynd')
-               | selectattr('score','ge',15)
-               | selectattr('price','le',150) | list %}
-            {% for w in picks %}{{ w.name }} — {{ w.score }}/20, {{ w.price }} kr
-            {% endfor %}
+            {{ trigger.event.data.name }} — {{ trigger.event.data.score }}/20,
+            {{ trigger.event.data.price }} kr
+          data:
+            url: "{{ trigger.event.data.url }}"
+```
+
+Because the event fires once per wine, this notifies once — not on every poll
+for as long as the wine stays in the release.
+
+Light something up when an exceptional wine is released:
+
+```yaml
+automation:
+  - alias: "Wine: flash the rack on an exceptional score"
+    triggers:
+      - trigger: event
+        event_type: munskankarna_wine_released
+    conditions:
+      - "{{ (trigger.event.data.score or 0) >= 18 }}"
+    actions:
+      - action: light.turn_on
+        target:
+          entity_id: light.wine_rack
+        data:
+          rgb_color: [130, 20, 40]
+          effect: pulse
 ```
 
 ## Services
@@ -417,7 +487,17 @@ trade-off is that "three releases" reaches back further for the slower ones.
 > rows and no websocket traffic, and it survives a restart — so Home Assistant
 > restarting does not re-read release pages that cannot have changed. Published
 > release pages are treated as immutable: only the current release of each type
-> is re-read on each poll.
+> is re-read on each poll, and the file is rewritten only when its contents
+> actually changed — which, given that immutability, is about once a week per
+> tasting type rather than once every poll.
+
+The release index lists five releases per tasting type, which covers the
+default depth of three with room to spare. Ask for more than five and the
+integration follows that type's own page on the site to find the rest — one
+extra request, and only for a type that is actually short. If a type still has
+fewer releases published than you asked for, that is reported in the
+`warnings` attribute of `sensor.munskankarna_wines_tested` rather than quietly
+giving you a shorter archive than you configured.
 
 ### Why the archive sometimes shows fewer wines than you configured
 

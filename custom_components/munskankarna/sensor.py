@@ -21,6 +21,7 @@ from homeassistant.components.sensor import (
     ENTITY_ID_FORMAT,
     SensorEntity,
     SensorEntityDescription,
+    SensorStateClass,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -237,6 +238,58 @@ def _fynd_wines(coordinator: MunskankarnaCoordinator) -> list[WineDict]:
     return [w for w in coordinator.all_wines() if w.get("value_rating") == VALUE_FYND]
 
 
+def _median(values: list[float]) -> float | None:
+    """The middle value, averaging the two middles of an even sample.
+
+    `statistics.median` would do this, but it raises on an empty sample and
+    the empty sample is the case that matters most here: a figure over no
+    wines has to read unknown, never zero.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def _numbers(coordinator: MunskankarnaCoordinator, field: str) -> list[float]:
+    """Every present, numeric value of one field across the current releases.
+
+    The parser allows any measurement to be missing independently, so a wine
+    with no score still counts towards the price median and vice versa.
+    """
+    return [
+        float(value)
+        for wine in coordinator.all_wines()
+        if isinstance(value := wine.get(field), (int, float))
+    ]
+
+
+def _sample(values: list[float]) -> dict[str, Any]:
+    """How many wines a trend figure covers, so a reader can weigh it."""
+    return {"sample_size": len(values)}
+
+
+def _rounded_median(values: list[float], places: int) -> float | None:
+    median = _median(values)
+    return None if median is None else round(median, places)
+
+
+def _fynd_share(coordinator: MunskankarnaCoordinator) -> float | None:
+    """What share of the current releases is a bargain, as a percentage.
+
+    Counted over every wine, not only the rated ones: an unrated wine is
+    still a wine that is not a Fynd, so excluding it would inflate the share.
+    """
+    wines = coordinator.all_wines()
+    if not wines:
+        return None
+    fynd = sum(1 for wine in wines if wine.get("value_rating") == VALUE_FYND)
+    return round(fynd / len(wines) * 100, 1)
+
+
 def _latest_release_date(coordinator: MunskankarnaCoordinator) -> str | None:
     if not coordinator.data:
         return None
@@ -352,6 +405,46 @@ def _history_attributes(coordinator: MunskankarnaCoordinator) -> dict[str, Any]:
     }
 
 
+#: Small scalars the recorder can graph. The wine lists live in attributes,
+#: which are not state history, so a chart card has nothing to plot from them.
+#: These three change when a release lands and cost a handful of bytes a poll,
+#: which is what makes a price-to-score trend possible with no HACS card at
+#: all. `measurement` so long-term statistics accumulate.
+TREND_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
+    MunskankarnaSensorDescription(
+        key="median_score",
+        translation_key="median_score",
+        name="Median score",
+        icon="mdi:chart-bell-curve",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda c: _rounded_median(_numbers(c, "score"), 1),
+        attributes_fn=lambda c: _sample(_numbers(c, "score")),
+    ),
+    MunskankarnaSensorDescription(
+        key="median_price_per_litre",
+        translation_key="median_price_per_litre",
+        name="Median price per litre",
+        icon="mdi:cash",
+        native_unit_of_measurement="kr/l",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value_fn=lambda c: _rounded_median(_numbers(c, "price_per_litre"), 2),
+        attributes_fn=lambda c: _sample(_numbers(c, "price_per_litre")),
+    ),
+    MunskankarnaSensorDescription(
+        key="fynd_share",
+        translation_key="fynd_share",
+        name="Fynd share",
+        icon="mdi:tag-percent",
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=_fynd_share,
+        attributes_fn=lambda c: _sample(c.all_wines()),
+    ),
+)
+
 GLOBAL_SENSORS: tuple[MunskankarnaSensorDescription, ...] = (
     MunskankarnaSensorDescription(
         key="top_pick",
@@ -441,7 +534,7 @@ async def async_setup_entry(
 
     entities: list[SensorEntity] = [
         MunskankarnaGlobalSensor(coordinator, entry, description)
-        for description in GLOBAL_SENSORS
+        for description in (*GLOBAL_SENSORS, *TREND_SENSORS)
     ]
     # One sensor per *configured* tasting type, not merely per type that
     # loaded on the first poll. Platform setup runs once, so keying this on the

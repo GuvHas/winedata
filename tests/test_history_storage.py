@@ -9,6 +9,8 @@ that cannot have changed.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from homeassistant.core import HomeAssistant
@@ -151,3 +153,120 @@ async def test_removing_the_entry_removes_its_stored_history(
     assert await hass.config_entries.async_remove(entry.entry_id)
     await hass.async_block_till_done()
     assert hass_storage.get(key, {}).get("data") in (None, {}), "the cache outlived the entry"
+
+
+@contextmanager
+def _writes(coordinator: MunskankarnaCoordinator):
+    """Count the times the cache is actually handed to the store."""
+    store = coordinator._store
+    counter = SimpleNamespace(count=0)
+    real_delay, real_save = store.async_delay_save, store.async_save
+
+    def delayed(data_func, delay=0):  # noqa: ANN001
+        counter.count += 1
+        return real_delay(data_func, delay)
+
+    async def immediate(data):  # noqa: ANN001
+        counter.count += 1
+        return await real_save(data)
+
+    with (
+        patch.object(store, "async_delay_save", delayed),
+        patch.object(store, "async_save", immediate),
+    ):
+        yield counter
+
+
+@contextmanager
+def _site(pages: dict[str, dict]):
+    """A site whose release pages can be swapped between polls."""
+
+    async def fake_release(self, rid: str, title: str) -> dict:  # noqa: ANN001
+        return pages[rid]
+
+    with (
+        patch.object(
+            MunskankarnaCoordinator, "_async_fetch_index",
+            new=AsyncMock(return_value=list(INDEX)),
+        ),
+        patch.object(MunskankarnaCoordinator, "_async_fetch_release", new=fake_release),
+    ):
+        yield
+
+
+async def test_an_unchanged_cycle_is_not_written_again(hass: HomeAssistant) -> None:
+    """Published pages are immutable, so most polls change nothing at all.
+
+    Rewriting the whole file regardless costs 257 kB every six hours at the
+    defaults — about 1 MB a day of byte-identical writes, usually onto an SD
+    card. Roughly 99% of them are avoidable.
+    """
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT]})
+    coordinator = MunskankarnaCoordinator(hass, entry)
+    pages = {r["id"]: _result(r["id"]) for r in INDEX}
+
+    with _site(pages), _writes(coordinator) as writes:
+        await coordinator.async_load_history()
+        await coordinator.async_refresh()
+        after_first = writes.count
+        await coordinator.async_refresh()
+        await coordinator.async_refresh()
+
+    assert after_first == 1, f"the first cycle wrote {after_first} time(s)"
+    assert writes.count == 1, (
+        f"two unchanged cycles wrote {writes.count - after_first} more time(s)"
+    )
+
+
+async def test_a_changed_release_is_written(hass: HomeAssistant) -> None:
+    """Skipping a write must depend on the content, not on the clock."""
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT]})
+    coordinator = MunskankarnaCoordinator(hass, entry)
+    pages = {r["id"]: _result(r["id"]) for r in INDEX}
+
+    with _site(pages), _writes(coordinator) as writes:
+        await coordinator.async_load_history()
+        await coordinator.async_refresh()
+        baseline = writes.count
+
+        newest = "t-2026-09-11"
+        pages[newest] = {
+            **pages[newest],
+            "wines": [
+                build_wine(newest, "Ett Vin"),
+                build_wine(newest, "Sent Tillagt", score=16.0),
+            ],
+        }
+        await coordinator.async_refresh()
+
+    assert writes.count == baseline + 1, "a changed release was not persisted"
+
+
+async def test_an_upgrade_persists_the_announcement_record(
+    hass: HomeAssistant,
+) -> None:
+    """The record must be written even when the history itself is unchanged.
+
+    1.1.3 stored history and nothing else. On upgrade the first cycle seeds
+    the record of what has been announced while the releases stay byte for
+    byte the same — so a check that looked only at the history would skip the
+    write, and every restart would seed again and re-announce.
+    """
+    entry = create_entry(hass, options={CONF_KINDS: [KIND_TILLFALLIGT]})
+    seeding = MunskankarnaCoordinator(hass, entry)
+    pages = {r["id"]: _result(r["id"]) for r in INDEX}
+    with _site(pages):
+        await seeding.async_load_history()
+        await seeding.async_refresh()
+    stored_history = (await seeding._store.async_load())["history"]
+
+    # Exactly what 1.1.3 left behind: history, no record.
+    await seeding._store.async_save({"history": stored_history})
+
+    upgraded = MunskankarnaCoordinator(hass, entry)
+    with _site(pages), _writes(upgraded) as writes:
+        await upgraded.async_load_history()
+        await upgraded.async_refresh()
+
+    assert writes.count == 1, "the seeded announcement record was never persisted"
+    assert (await upgraded._store.async_load()).get("seen"), "the record is missing"

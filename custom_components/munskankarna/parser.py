@@ -454,6 +454,43 @@ def parse_release_index(html: str, base_url: str = DEFAULT_BASE_URL) -> list[Rel
     return list(releases.values())
 
 
+def parse_more_links(html: str, base_url: str = DEFAULT_BASE_URL) -> dict[str, str]:
+    """Each tasting type's own page, keyed by kind.
+
+    The index carries five releases per type and then a "Visa fler från X"
+    link to that type's page. Five is more than the default retention depth,
+    so this is read but rarely used — a deeper depth is what needs it.
+
+    The kind comes from the heading above the link, never from the href: the
+    site reaches "Fast sortiment" at /provningstyp/ordinarie-sortimentet, so
+    the slug in the URL is not the slug we classify by.
+    """
+    soup = _soup(html)
+    links: dict[str, str] = {}
+
+    for anchor in soup.find_all("a"):
+        text = clean(anchor.get_text())
+        if not text.lower().startswith("visa fler"):
+            continue
+
+        # These URLs are fetched, not merely rendered, so the same-origin and
+        # scheme checks every other scraped link goes through are not optional
+        # here — an absolute href would otherwise point the client at any host
+        # it names, the Home Assistant machine's own network included.
+        resolved = safe_url(anchor.get("href"), base_url)
+        if not resolved or "/vinlocus/" not in resolved:
+            continue
+
+        heading = anchor.find_previous(["h2", "h3"])
+        if heading is None:
+            continue
+        kind, _label = parse_assortment_kind(clean(heading.get_text()))
+        if kind and kind not in links:
+            links[kind] = resolved
+
+    return links
+
+
 # ---------------------------------------------------------------------------
 # Release pages
 # ---------------------------------------------------------------------------

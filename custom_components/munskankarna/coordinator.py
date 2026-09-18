@@ -7,6 +7,8 @@ then thin projections over that prepared shape.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from datetime import datetime, timedelta
@@ -39,6 +41,7 @@ from .const import (
     VALUE_FYND,
     VALUE_ORDER,
 )
+from .events import Announcer
 from .parser import ParseResult, ReleaseDict, WineDict
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,6 +59,17 @@ _MAX_COOLDOWN: Final = 6 * 3600.0
 
 #: Schema version of the on-disk history cache.
 STORAGE_VERSION: Final = 1
+
+
+def _fingerprint(payload: dict[str, Any]) -> str:
+    """A stable digest of exactly what would be written.
+
+    Serialising 257 kB costs a millisecond or two once every six hours, which
+    buys skipping the write itself in the ~99% of cycles that change nothing.
+    Keys are sorted so a reordering is not mistaken for a change.
+    """
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.blake2b(encoded, digest_size=16).hexdigest()
 
 
 def history_storage_key(entry_id: str) -> str:
@@ -190,6 +204,12 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         #: History read back from disk, used until the first cycle replaces it.
         self._restored_history: dict[str, list[ParseResult]] = {}
+        #: Remembers what has already gone out on the bus, so polling every
+        #: six hours does not re-announce the same week all week.
+        self._announcer = Announcer(hass)
+        #: Digest of the payload last handed to the store, so an unchanged
+        #: cycle costs no write at all.
+        self._persisted: str | None = None
         hours = entry.options.get(CONF_SCAN_INTERVAL_HOURS)
         interval = timedelta(hours=hours) if hours else DEFAULT_SCAN_INTERVAL
 
@@ -272,6 +292,11 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
                             exc_info=True)
             return
 
+        # Restored before the history is validated: a cache whose shape went
+        # bad must not also wipe the record of what was already announced,
+        # which would make the next cycle announce the refetch.
+        self._announcer.restore((stored or {}).get("seen"))
+
         history = (stored or {}).get("history")
         if not isinstance(history, dict):
             if history is not None:
@@ -284,18 +309,47 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if isinstance(releases, list) and releases
         }
         self._restored_history = restored
+        # What a cycle that changes nothing would write. Seeding it here means
+        # a restart that finds the site unchanged writes nothing at all.
+        self._persisted = _fingerprint(
+            {"history": restored, "seen": self._announcer.as_stored()}
+        )
         if restored:
             _LOGGER.debug(
                 "Restored %d retained release(s) from storage",
                 sum(len(v) for v in restored.values()),
             )
 
-    async def _async_save_history(self, history: dict[str, list[ParseResult]]) -> None:
-        """Persist the retained releases. Never fatal to an update."""
+    async def _async_save_history(self, history: dict[str, list[ParseResult]]) -> bool:
+        """Persist the retained releases if they changed; say whether they are on disk.
+
+        Published release pages are immutable and only the newest per kind is
+        re-read, so most cycles produce a byte-identical file. Writing it
+        anyway cost about 1 MB a day at the defaults, usually onto an SD card.
+
+        The digest covers the announcement record as well as the history, not
+        just the history: the cycle that seeds the record leaves the releases
+        untouched, and skipping that write would make every restart seed again
+        and re-announce the current week.
+        """
+        payload = {"history": history, "seen": self._announcer.as_stored()}
+        if (digest := _fingerprint(payload)) == self._persisted:
+            _LOGGER.debug("History unchanged since the last write; not rewriting")
+            # Unchanged means what is on disk already says this, so the caller
+            # can announce: there is nothing here a restart would lose.
+            return True
+
         try:
-            await self._store.async_save({"history": history})
+            # Written rather than deferred: async_save already serialises and
+            # writes in an executor, so it costs the event loop nothing, and a
+            # delay would leave a window where a hard stop loses the cycle for
+            # no real gain once the unchanged cycles are skipped outright.
+            await self._store.async_save(payload)
         except Exception:  # noqa: BLE001 - failing to cache is not failing to update
             _LOGGER.warning("Could not persist the history cache", exc_info=True)
+            return False
+        self._persisted = digest
+        return True
 
     async def async_remove_storage(self) -> None:
         """Delete the cache when the config entry is removed."""
@@ -339,6 +393,14 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Fetch one release page."""
         return await self._active_client().async_fetch_release(release_id, title)
 
+    def _async_more_links(self) -> dict[str, str]:
+        """Each tasting type's own page, as the last index fetch advertised."""
+        return getattr(self._api, "more_links", {}) or {}
+
+    async def _async_fetch_more(self, kind: str, url: str) -> list[ReleaseDict]:
+        """Fetch one tasting type's own page."""
+        return await self._active_client().async_fetch_kind_index(url)
+
     # -- update ------------------------------------------------------------
 
     async def _async_update_data(self) -> CoordinatorData:
@@ -377,6 +439,54 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             finally:
                 self._api = None
 
+    async def _async_deepen_index(
+        self, index: list[ReleaseDict], warnings: list[str]
+    ) -> list[ReleaseDict]:
+        """Top up any tracked kind the index lists fewer of than configured.
+
+        The index carries five releases per tasting type and then a link to
+        that type's own page, while the retention depth goes to six — so the
+        sixth release exists and was simply never seen. Following costs a
+        request, so it happens only for a kind that is actually short, which
+        at the default depth of three is none of them.
+
+        A kind still short afterwards is reported rather than quietly
+        truncated. That also covers the per-type page not parsing: the depth
+        the user asked for is not met either way, and they should know.
+        """
+        more_links = self._async_more_links()
+        # Copied, not appended to: the caller's list is not ours to grow, and
+        # a reused index would otherwise accumulate across cycles.
+        deepened = list(index)
+
+        for kind in self.kinds:
+            found = {r["id"] for r in deepened if r["kind"] == kind}
+            if len(found) >= self.history_count:
+                continue
+
+            if url := more_links.get(kind):
+                try:
+                    extra = await self._async_fetch_more(kind, url)
+                except RateLimited:
+                    # Deepening history is never worth walking into a limit.
+                    raise
+                except MunskankarnaError as err:
+                    _LOGGER.warning("Could not read the page for %s: %s", kind, err)
+                    warnings.append(f"{kind}: could not read the tasting type's page: {err}")
+                    extra = []
+                for release in extra:
+                    if release["kind"] == kind and release["id"] not in found:
+                        deepened.append(release)
+                        found.add(release["id"])
+
+            if len(found) < self.history_count:
+                warnings.append(
+                    f"{kind}: Munskänkarna lists {len(found)} release(s), fewer than "
+                    f"the {self.history_count} configured"
+                )
+
+        return deepened
+
     async def _async_collect(self) -> CoordinatorData:
         """Fetch the index and every configured release using the active client."""
         try:
@@ -389,6 +499,9 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
         except MunskankarnaError as err:
             raise UpdateFailed(f"Could not fetch the Munskänkarna release index: {err}") from err
 
+        index_warnings: list[str] = []
+        index = await self._async_deepen_index(index, index_warnings)
+
         wanted = newest_releases_per_kind(index, self.kinds, self.history_count)
         if not wanted:
             raise UpdateFailed(
@@ -398,7 +511,7 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         releases: dict[str, ParseResult] = {}
         history: dict[str, list[ParseResult]] = {}
-        warnings: list[str] = []
+        warnings: list[str] = list(index_warnings)
         #: What the previous cycle published, so a kind that cannot be
         #: refreshed keeps what it had rather than vanishing from the snapshot.
         previous: dict[str, ParseResult] = (self.data or {}).get("releases", {})
@@ -511,7 +624,17 @@ class MunskankarnaCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if kind not in history and (carried_history := previous_history.get(kind)):
                 history[kind] = carried_history
 
-        await self._async_save_history(history)
+        # Recorded, persisted, then announced — in that order. Firing first
+        # would leave the events sent and the record behind them missing if
+        # the write failed or the process stopped, and a restart would then
+        # announce the same week again. A write that fails rolls the record
+        # back so the next cycle offers the same wines rather than swallowing
+        # them.
+        pending = self._announcer.async_collect(history)
+        if await self._async_save_history(history):
+            self._announcer.async_dispatch(pending)
+        else:
+            self._announcer.async_rollback(pending)
 
         return CoordinatorData(
             releases=releases,

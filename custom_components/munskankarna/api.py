@@ -47,7 +47,13 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .const import DEFAULT_BASE_URL
-from .parser import ParseResult, ReleaseDict, parse_release_index, parse_release_page
+from .parser import (
+    ParseResult,
+    ReleaseDict,
+    parse_more_links,
+    parse_release_index,
+    parse_release_page,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -165,6 +171,8 @@ class MunskankarnaClient:
         self._owns_client = client is None
         self._verify = verify
         self._retry_backoff = retry_backoff
+        #: Each tasting type's own page, filled in by async_fetch_releases.
+        self.more_links: dict[str, str] = {}
         self._authenticated = False
         self._last_request = 0.0
 
@@ -393,7 +401,15 @@ class MunskankarnaClient:
 
     async def async_fetch_releases(self) -> list[ReleaseDict]:
         """Fetch and parse the release index."""
-        return parse_release_index(await self.fetch_text(RELEASE_INDEX_PATH), self._base_url)
+        html = await self.fetch_text(RELEASE_INDEX_PATH)
+        # Read on the way past. Following one costs a request, so that is the
+        # coordinator's call to make, and only for a kind that is short.
+        self.more_links = parse_more_links(html, self._base_url)
+        return parse_release_index(html, self._base_url)
+
+    async def async_fetch_kind_index(self, url: str) -> list[ReleaseDict]:
+        """Fetch one tasting type's own page, for releases the index omits."""
+        return parse_release_index(await self.fetch_text(url), self._base_url)
 
     async def async_fetch_release(self, release_id: str, title: str) -> ParseResult:
         """Fetch and parse a single release page."""
